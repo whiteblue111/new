@@ -1,0 +1,8 @@
+.vscode/
+libraries/doc
+project/out
+*.a
+*.o
+*.d
+*.sh
+*.tflite
