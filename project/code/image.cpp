@@ -161,10 +161,8 @@ void image_process(void)
 
     /* 1) BGR → 灰度 → OTSU → 闭运算 */
     bin_img = s_imgproc.processImage(rgb_img);
+    bin_bird_img = s_imgproc.image_correction(bin_img);
     if (bin_img.empty()) return;
-
-
-
 
     /* 2) 调试可视化图（en_show=false 时仅占位） */
     /* TODO: 可视化总开关，暂时 imgShow = rgb_img 的浅拷贝即可 */
@@ -358,13 +356,13 @@ static void trackRecognition(cv::Mat &imageBinary)
     else
         pointsEdgeRight_size = 0;
 
-    /* 圆形伪线过滤（直行邻接 4 点完全相同视为环形） */
+    /* 圆形伪线过滤（直行邻接 4 点完全相同视为环形）!!!!!疑似有问题 */
     if (pointsEdgeLeft_size > 8)
     {
         bool circular = true;
         for (int i = 0; i < 4; i++)
             if (pointsEdgeLeft[i].x != pointsEdgeLeft[i + 4].x
-             && pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
+              || pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
         if (circular) pointsEdgeLeft_size = 0;
     }
     if (pointsEdgeRight_size > 8)
@@ -372,7 +370,7 @@ static void trackRecognition(cv::Mat &imageBinary)
         bool circular = true;
         for (int i = 0; i < 4; i++)
             if (pointsEdgeRight[i].x != pointsEdgeRight[i + 4].x
-             && pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
+             || pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
         if (circular) pointsEdgeRight_size = 0;
     }
 

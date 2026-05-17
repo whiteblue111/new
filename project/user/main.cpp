@@ -50,6 +50,7 @@ RedBlockAvoider g_brick_avoider;
 uint8 rgb_image[320][240];
 uint8 gray_cut_image[320][120];
 uint8 bin_cut_image[320][120];
+uint8 bin_bird_image[320][120];
 
 int my_fps = 0;
 
@@ -152,7 +153,7 @@ int main()
     {
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
         seekfree_assistant_camera_information_config(
-            SEEKFREE_ASSISTANT_GRAY, bin_cut_image[0], COLSIMAGE, IMAGE_CUT_H);
+            SEEKFREE_ASSISTANT_GRAY, bin_bird_image[0], COLSIMAGE, IMAGE_CUT_H);
         /* XY_BOUNDARY：3 条边线，每条 POINTS_MAX_LEN 点 */
         seekfree_assistant_camera_boundary_config(
             XY_BOUNDARY, POINTS_MAX_LEN,
@@ -188,16 +189,29 @@ int main()
         if (send_now)
         {
             /* 320×120 灰度图 */
-            if (gray_img.rows == IMAGE_CUT_H && gray_img.cols == COLSIMAGE)
+            // if (gray_img.rows == IMAGE_CUT_H && gray_img.cols == COLSIMAGE)
+            // {
+            //     if (gray_img.isContinuous())
+            //     {
+            //         memcpy(bin_cut_image[0], bin_img.data, COLSIMAGE * IMAGE_CUT_H);
+            //     }
+            //     else
+            //     {
+            //         for (int r = 0; r < IMAGE_CUT_H; ++r)
+            //             memcpy(bin_cut_image[r], bin_img.ptr<uint8_t>(r), COLSIMAGE);
+            //     }
+            // }
+                       /* 320×120 俯视图 */
+            if (bin_bird_img.rows == IMAGE_CUT_H && bin_bird_img.cols == COLSIMAGE)
             {
-                if (gray_img.isContinuous())
+                if (bin_bird_img.isContinuous())
                 {
-                    memcpy(bin_cut_image[0], bin_img.data, COLSIMAGE * IMAGE_CUT_H);
+                    memcpy(bin_bird_image[0], bin_bird_img.data, COLSIMAGE * IMAGE_CUT_H);
                 }
                 else
                 {
                     for (int r = 0; r < IMAGE_CUT_H; ++r)
-                        memcpy(bin_cut_image[r], bin_img.ptr<uint8_t>(r), COLSIMAGE);
+                        memcpy(bin_bird_image[r], bin_bird_img.ptr<uchar>(r), COLSIMAGE);
                 }
             }
             /* 边线（XY_BOUNDARY 平铺） */

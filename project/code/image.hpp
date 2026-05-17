@@ -53,8 +53,11 @@ enum class Scene
 /* ====================== 全局图像 ====================== */
 extern cv::Mat rgb_img;     /* 摄像头 BGR 原图（NCNN 输入） */
 extern cv::Mat gray_img;    /* 灰度图（与 rgb_img 同尺寸） */
+extern cv::Mat gray_bird_img; /* 透视变换后的灰度图（与 rgb_img 同尺寸） */
 extern cv::Mat bin_img;     /* OTSU + 闭运算后的二值图 */
+extern cv::Mat bin_bird_img; /* 透视变换后的二值图（与 rgb_img 同尺寸） */
 extern cv::Mat imgShow;     /* 可视化用图（en_show=false 时仅作占位） */
+
 
 
 /* ====================== 全局点集 ====================== */
