@@ -131,14 +131,14 @@ public:
     int both_L_find_counter    = 0;
 
     int far_left_x0  = COLSIMAGE / 4;
-    int far_left_y0  = ROI_TOP + 30;
+    int far_left_y0  = 30;              /* ROI 局部行号（原全图 ROI_TOP+30） */
     int far_right_x0 = COLSIMAGE * 3 / 4;
-    int far_right_y0 = ROI_TOP + 30;
+    int far_right_y0 = 30;
 
     int    approx_num      = 3;
     int    block_size      = 9;
     int    clip_value      = 3;
-    double pixel_per_meter = 222.222;
+    double pixel_per_meter = 88.88;
     double SAMPLE_DIST     = 0.02;
     double ROAD_WIDTH      = 0.45;
     double dist            = pixel_per_meter * ROAD_WIDTH / 2.0;

@@ -47,9 +47,11 @@ RedBlockAvoider g_brick_avoider;
  * image_process() 完成后从 gray_img 拷入，由 seekfree_assistant_camera_send()
  * 一次性发送给逐飞助手。
  */
-uint8 rgb_image[320][240];
-uint8 gray_cut_image[320][120];
-uint8 bin_cut_image[320][120];
+uint8 rgb_image[240][320];
+uint8 gray_image[240][320];
+uint8 gray_cut_image[130][320];
+uint8 bin_cut_image[130][320];
+uint8 bin_bird_image[130][320];
 
 int my_fps = 0;
 
@@ -152,7 +154,7 @@ int main()
     {
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
         seekfree_assistant_camera_information_config(
-            SEEKFREE_ASSISTANT_GRAY, bin_cut_image[0], COLSIMAGE, IMAGE_CUT_H);
+            SEEKFREE_ASSISTANT_GRAY, bin_cut_image[0], 320, 130);
         /* XY_BOUNDARY：3 条边线，每条 POINTS_MAX_LEN 点 */
         seekfree_assistant_camera_boundary_config(
             XY_BOUNDARY, POINTS_MAX_LEN,
@@ -176,11 +178,15 @@ int main()
     /* ====================== 主循环 ====================== */
     while (1)
     {
-        if (!image_get(camera, rgb_img, gray_img)) continue;
+        if (!image_get(camera, rgb_img, gray_img, gray_cut_img)) continue;
 
         /* -------- 巡线主流水线 -------- */
         image_process();
         img_err = Image_Error_Get();
+
+        static int disp_cnt = 0;
+        if (++disp_cnt % 3 == 0)
+            display_show_track();
 
         /* -------- 每 5 帧发一次给逐飞助手 -------- */
         static int send_cnt = 0;
@@ -188,16 +194,18 @@ int main()
         if (send_now)
         {
             /* 320×120 灰度图 */
-            if (gray_img.rows == IMAGE_CUT_H && gray_img.cols == COLSIMAGE)
+            if (bin_img.rows == 130 && bin_img.cols == 320)
             {
                 if (gray_img.isContinuous())
                 {
-                    memcpy(bin_cut_image[0], bin_img.data, COLSIMAGE * IMAGE_CUT_H);
+                    memcpy(bin_cut_image[0], bin_img.data, 320 * 130);
                 }
                 else
                 {
-                    for (int r = 0; r < IMAGE_CUT_H; ++r)
-                        memcpy(bin_cut_image[r], bin_img.ptr<uint8_t>(r), COLSIMAGE);
+                    for (int r = 0; r < 130; ++r)
+                    {
+                        memcpy(bin_cut_image[0] + r * 320, bin_img.ptr<uint8_t>(r), 320);
+                    }
                 }
             }
             /* 边线（XY_BOUNDARY 平铺） */

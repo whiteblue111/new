@@ -8,7 +8,7 @@
  *                                          + blur + resample + 角度 + NMS + 找拐点
  *   Cross_Check / Cross_Run            → 十字状态机
  *   Ring_Check  / Ring_Run             → 环岛状态机
- *   fitting() → t_CenterEdge           → 双预瞄点 aim_angle = atan(预瞄点)
+ *   fitting() → normalizeCenterEdge → CenterEdge → computeAimAngle()
  */
 
 #include "image.hpp"
@@ -21,6 +21,7 @@
 /* ====================== 全局图像 ====================== */
 cv::Mat rgb_img;
 cv::Mat gray_img;
+cv::Mat gray_cut_img;
 cv::Mat gray_bird_img;
 cv::Mat bin_img;
 cv::Mat bin_bird_img;
@@ -89,17 +90,21 @@ static Ring           s_ring;
 static const int      block_size       = 9;
 static const int      clip_value       = 3;
 static const int      thresOTSU        = 128;
-static const double   pixel_per_meter  = 222.222;
+static const double   pixel_per_meter  = 88.88;
 static const double   SAMPLE_DIST      = 0.02;
 static const double   ROAD_WIDTH       = 0.45;
 static const double   car_length       = 0.18;   /* 米 */
-static const double   aim_distance_f   = 0.55;
-static const double   aim_distance_n   = 0.25;
+static const double   aim_distance_f     = 0.55;
+static const double   aim_distance_n     = 0.25;
+static const double   aim_distance_ring  = 0.60;
 static const int      approx_num       = 3;
 static const double   dist_half_road   = pixel_per_meter * ROAD_WIDTH / 2.0;
 
-static cv::Point      seedPoint        = cv::Point(COLSIMAGE / 2, ROI_BOTTOM - 1);
-static float          aim_angle_last   = 0.0f;
+static cv::Point      seedPoint        = cv::Point(COLSIMAGE / 2, seed_y_roi);
+static float          aim_angle_last     = 0.0f;
+static float          s_track_cx         = COLSIMAGE / 2.0f;
+static float          s_track_cy         = (float)(ROI_H * 0.95);
+static bool           s_center_effective = false;
 static int            x0_seed = COLSIMAGE / 2;
 static int            x1_seed = COLSIMAGE / 2;
 
@@ -124,6 +129,7 @@ static void line_straight_detection();
 static void find_corners();
 static void trackRecognition(cv::Mat &imageBinary);
 static void fitting();
+static bool normalizeCenterEdge(float &cx, float &cy);
 static void computeAimAngle();
 
 
@@ -137,14 +143,14 @@ static void computeAimAngle();
  * @return           取帧成功为 true
  * @note             flip(-1) 与历史代码兼容（摄像头倒装时整图旋转 180°）
  */
-bool image_get(lq_camera_ex &camera, cv::Mat &raw, cv::Mat &gray)
+bool image_get(lq_camera_ex &camera, cv::Mat &raw, cv::Mat &gray, cv::Mat &cut_gray)
 {
     bool ok = camera.get_frame_raw_gray(raw, gray);
     if (!ok || raw.empty() || gray.empty()) return false;
     cv::flip(raw,  raw,  -1);
     cv::flip(gray, gray, -1);
     cv::Rect roi(0, ROI_TOP, COLSIMAGE, ROI_BOTTOM - ROI_TOP);
-    gray = gray(roi);
+    cut_gray = gray(roi);
     return ok;
 }
 
@@ -153,15 +159,17 @@ bool image_get(lq_camera_ex &camera, cv::Mat &raw, cv::Mat &gray)
 
 /**
  * @brief 巡线主流水线
- * @sample image_get(camera, rgb_img, gray_img); image_process();
+ * @sample image_get(camera, rgb_img, gray_img, cut_gray); image_process();
  */
 void image_process(void)
 {
     if (rgb_img.empty() || gray_img.empty()) return;
 
-    /* 1) BGR → 灰度 → OTSU → 闭运算 */
-    bin_img = s_imgproc.processImage(rgb_img);
+    /* 1)  灰度 → OTSU → 闭运算 */
+    bin_img = s_imgproc.processImage(gray_cut_img);
     if (bin_img.empty()) return;
+    
+    bin_bird_img = s_imgproc.image_correction(bin_img);
 
 
 
@@ -228,11 +236,14 @@ float Image_Error_Get(void)
 
 /**
  * @brief 巡线主识别（迷宫法 + 透视 + 后处理 + 找拐点）
- * @param imageBinary OTSU + 闭运算后的二值图（320x240）
- * @note  对应 temp_repo Standard::trackRecognition
+ * @param imageBinary OTSU + 闭运算后的 ROI 二值图（320x130，y 为局部行号 0..ROI_H-1）
+ * @note  对应 temp_repo Standard::trackRecognition；输入为 gray_cut 同尺寸 bin_img
  */
 static void trackRecognition(cv::Mat &imageBinary)
 {
+    const int bin_rows = imageBinary.rows;
+    const int bin_cols = imageBinary.cols;
+
     /* 清空所有工作缓存 */
     pointsEdgeLeft.clear();        pointsEdgeLeft_size        = 0;
     pointsEdgeRight.clear();       pointsEdgeRight_size       = 0;
@@ -256,20 +267,20 @@ static void trackRecognition(cv::Mat &imageBinary)
     t_L_pointRight_id      = 0;
 
     /* ===== 1) floodFill：把不连通白噪声涂黑，保留赛道 ===== */
-    cv::Mat mask = cv::Mat::zeros(ROWSIMAGE + 2, COLSIMAGE + 2, CV_8UC1);
+    cv::Mat mask = cv::Mat::zeros(bin_rows + 2, bin_cols + 2, CV_8UC1);
     bool flood_effect = false;
-    if (seedPoint.x < 0 || seedPoint.x >= COLSIMAGE
-     || seedPoint.y < 0 || seedPoint.y >= ROWSIMAGE)
+    if (seedPoint.x < 0 || seedPoint.x >= bin_cols
+     || seedPoint.y < 0 || seedPoint.y >= bin_rows)
     {
-        seedPoint = cv::Point(COLSIMAGE / 2, ROI_BOTTOM - 1);
+        seedPoint = cv::Point(bin_cols / 2, bin_rows - 1);
     }
     if (imageBinary.at<uchar>(seedPoint.y, seedPoint.x) != 255)
     {
         /* 在 ROI 底边附近重新找种子点 */
-        int sy = ROI_BOTTOM - 1;    /* 159 */
+        int sy = bin_rows - 1;
         if (aim_angle_last > 0)
         {
-            for (int x = COLSIMAGE / 2 - 10; x > 80; x--)
+            for (int x = bin_cols / 2 - 10; x > 80; x--)
             {
                 if (imageBinary.at<uchar>(sy, x) == 255)
                 {
@@ -281,7 +292,7 @@ static void trackRecognition(cv::Mat &imageBinary)
         }
         else
         {
-            for (int x = COLSIMAGE / 2 + 10; x < COLSIMAGE - 80; x++)
+            for (int x = bin_cols / 2 + 10; x < bin_cols - 80; x++)
             {
                 if (imageBinary.at<uchar>(sy, x) == 255)
                 {
@@ -299,9 +310,9 @@ static void trackRecognition(cv::Mat &imageBinary)
     if (flood_effect)
     {
         cv::floodFill(imageBinary, mask, seedPoint, 127, 0, 0, 4);
-        for (int y = 0; y < ROWSIMAGE; y++)
+        for (int y = 0; y < bin_rows; y++)
         {
-            for (int x = 0; x < COLSIMAGE; x++)
+            for (int x = 0; x < bin_cols; x++)
             {
                 if (imageBinary.at<uchar>(y, x) == 127)
                     imageBinary.at<uchar>(y, x) = 255;
@@ -318,23 +329,23 @@ static void trackRecognition(cv::Mat &imageBinary)
     x0_seed = COLSIMAGE / 2;
     x1_seed = COLSIMAGE / 2;
 
-    for (int i = 0; i < COLSIMAGE; i++)
+    for (int i = 0; i < bin_cols; i++)
     {
-        for (int j = rowCutBottom; j > rowCutUp; j--)
+        for (int j = rowCutBottom_roi; j > rowCutUp_roi; j--)
         {
             if (imageBinary.at<uchar>(j, i) < thresOTSU) break;
             left_start[i]++;
             right_start[i]++;
         }
     }
-    for (int i = 1; i < COLSIMAGE; i++)
+    for (int i = 1; i < bin_cols; i++)
     {
         if (left_start[i]                  > left_start[x0_seed])  x0_seed = i;
-        if (right_start[COLSIMAGE - 1 - i] > right_start[x1_seed]) x1_seed = COLSIMAGE - 1 - i;
+        if (right_start[bin_cols - 1 - i] > right_start[x1_seed]) x1_seed = bin_cols - 1 - i;
     }
 
     /* ===== 3) 迷宫法左右手巡边线 ===== */
-    int y0 = rowCutBottom;
+    int y0 = rowCutBottom_roi;
     int x0v = x0_seed;
     for (; x0v > 0; x0v--)
     {
@@ -346,9 +357,9 @@ static void trackRecognition(cv::Mat &imageBinary)
     else
         pointsEdgeLeft_size = 0;
 
-    int y1 = rowCutBottom;
+    int y1 = rowCutBottom_roi;
     int x1v = x1_seed;
-    for (; x1v < WIDTH; x1v++)
+    for (; x1v < bin_cols - 1; x1v++)
     {
         if (imageBinary.at<uchar>(y1, x1v + 1) < thresOTSU) break;
     }
@@ -364,7 +375,7 @@ static void trackRecognition(cv::Mat &imageBinary)
         bool circular = true;
         for (int i = 0; i < 4; i++)
             if (pointsEdgeLeft[i].x != pointsEdgeLeft[i + 4].x
-             && pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
+             || pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
         if (circular) pointsEdgeLeft_size = 0;
     }
     if (pointsEdgeRight_size > 8)
@@ -372,7 +383,7 @@ static void trackRecognition(cv::Mat &imageBinary)
         bool circular = true;
         for (int i = 0; i < 4; i++)
             if (pointsEdgeRight[i].x != pointsEdgeRight[i + 4].x
-             && pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
+             || pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
         if (circular) pointsEdgeRight_size = 0;
     }
 
@@ -494,34 +505,98 @@ static void fitting()
     }
     t_CenterEdge_size = (int)t_CenterEdge.size();
 
-    /* 反透视：把中线送回原图坐标，主循环可用 XY_BOUNDARY 直接发送 */
+    /* 起始点中线归一化（俯视图）：截断车前段 + 等距重采样 */
+    float cx = COLSIMAGE / 2.0f;
+    float cy = (float)(ROI_H * 0.95);
+    s_center_effective = normalizeCenterEdge(cx, cy);
+    s_track_cx = cx;
+    s_track_cy = cy;
+
+    // /* 反透视：基于归一化后的 t_CenterEdge，送显 / 串口 XY_BOUNDARY */
+    // for (int i = 0; i < t_CenterEdge_size; i++)
+    // {
+    //     int a, b;
+    //     s_general.Reverse_transf(a, b, t_CenterEdge[i].x, t_CenterEdge[i].y);
+    //     CenterEdge.emplace_back(a, b);
+    // }
+    // CenterEdge_size = (int)CenterEdge.size();
+}
+
+
+/**
+ * @brief 起始点中线归一化（移植 temp_repo Standard::run）
+ * @param[out] cx  车体参考列（俯视图），begin_id>0 时更新为最近点列
+ * @param[out] cy  车体参考行（俯视图），begin_id>0 时更新为最近点行
+ * @return         true 表示截断并重采样成功，可继续预瞄
+ * @note           输入/输出 t_CenterEdge 须在俯视图 [0,COLSIMAGE)×[0,ROI_H)；
+ *                 调用前建议 cx=COLSIMAGE/2, cy=ROI_H*0.95
+ */
+static bool normalizeCenterEdge(float &cx, float &cy)
+{
+    if (t_CenterEdge_size <= 0)
+        return false;
+
+    int begin_id = 0;
+    float min_dist = 1e9f;
     for (int i = 0; i < t_CenterEdge_size; i++)
     {
-        int a, b;
-        s_general.Reverse_transf(a, b, t_CenterEdge[i].x, t_CenterEdge[i].y);
-        CenterEdge.emplace_back(a, b);
+        float dx = (float)t_CenterEdge[i].x - cx;
+        float dy = (float)t_CenterEdge[i].y - cy;
+        float dist = std::sqrt(dx * dx + dy * dy);
+        if (dist < min_dist)
+        {
+            min_dist = dist;
+            begin_id = i;
+        }
     }
-    CenterEdge_size = (int)CenterEdge.size();
+
+    begin_id = s_general.clip(begin_id, 0, t_CenterEdge_size - 1);
+    if (t_CenterEdge_size - begin_id < 3)
+        return false;
+
+    if (begin_id > 0)
+    {
+        cx = (float)t_CenterEdge[begin_id].x;
+        cy = (float)t_CenterEdge[begin_id].y;
+    }
+
+    std::vector<POINT> temp_center;
+    temp_center.reserve((size_t)(t_CenterEdge_size - begin_id));
+    for (int i = begin_id; i < t_CenterEdge_size; i++)
+        temp_center.emplace_back(t_CenterEdge[i].x, t_CenterEdge[i].y);
+
+    int temp_center_size = (int)temp_center.size();
+    t_CenterEdge.clear();
+    t_CenterEdge_size = 0;
+    resample_points(temp_center, temp_center_size, t_CenterEdge, t_CenterEdge_size,
+                    (float)(SAMPLE_DIST * pixel_per_meter));
+    return t_CenterEdge_size >= 2;
 }
 
 
 /**
  * @brief 双预瞄点 aim_angle 计算
- * @note  以图像底部中点 (cx, cy)=(160, ROI_BOTTOM) 为参考，
+ * @note  以归一化后的车体参考点 (s_track_cx, s_track_cy) 为原点，
  *        在 t_CenterEdge 上找最接近 aim_distance_n/f * ppm 的两个点，
  *        以 car_length 为前向几何参数计算偏差角，再加权融合。
- *        无中线时复用上一次 aim_angle。
+ *        归一化无效或中线过短时复用 aim_angle_last。
  */
 static void computeAimAngle()
 {
-    if (t_CenterEdge_size < 2)
+    if (!s_center_effective || t_CenterEdge_size < 2)
     {
         aim_angle = aim_angle_last;
         return;
     }
 
-    const double cx = COLSIMAGE / 2.0;
-    const double cy = ROI_BOTTOM;
+    const double cx = s_track_cx;
+    const double cy = s_track_cy;
+
+    double aim_dist_n = aim_distance_n;
+    if (scene == (int)Scene::CrossScene)
+        aim_dist_n = 0.2;
+    else if (scene == (int)Scene::RingScene)
+        aim_dist_n = aim_distance_ring;
 
     int aim_index_far  = 0;
     int aim_index_near = 0;
@@ -540,7 +615,7 @@ static void computeAimAngle()
         double dx = t_CenterEdge[i].x - cx;
         double dy = cy - t_CenterEdge[i].y;
         double dn = std::sqrt(dx * dx + dy * dy);
-        double dis = std::fabs(aim_distance_n * pixel_per_meter - dn);
+        double dis = std::fabs(aim_dist_n * pixel_per_meter - dn);
         if (dis < min_dis) { aim_index_near = i; min_dis = dis; }
     }
 
@@ -950,8 +1025,8 @@ static void find_corners()
             int im1 = s_general.clip(i - 2, 0, n_a_t_pointsEdgeLeft_size - 1);
             int ip1 = s_general.clip(i + 2, 0, n_a_t_pointsEdgeLeft_size - 1);
             float conf = std::fabs(n_a_t_pointsEdgeLeft[i].angle)
-                       - (std::fabs(n_a_t_pointsEdgeLeft[im1].angle
-                                  + std::fabs(n_a_t_pointsEdgeLeft[ip1].angle))) / 2;
+                       - (std::fabs(n_a_t_pointsEdgeLeft[im1].angle)
+                        + std::fabs(n_a_t_pointsEdgeLeft[ip1].angle)) / 2.f;
             conf = std::fabs(conf * 180.0f / PI);
             if (!is_t_L_pointLeft_find && LCONF_MIN < conf && conf < LCONF_MAX)
             {
@@ -978,8 +1053,8 @@ static void find_corners()
             int im1 = s_general.clip(i - 2, 0, n_a_t_pointsEdgeRight_size - 1);
             int ip1 = s_general.clip(i + 2, 0, n_a_t_pointsEdgeRight_size - 1);
             float conf = std::fabs(n_a_t_pointsEdgeRight[i].angle)
-                       - (std::fabs(n_a_t_pointsEdgeRight[im1].angle
-                                  + std::fabs(n_a_t_pointsEdgeRight[ip1].angle))) / 2;
+                       - (std::fabs(n_a_t_pointsEdgeRight[im1].angle)
+                        + std::fabs(n_a_t_pointsEdgeRight[ip1].angle)) / 2.f;
             conf = std::fabs(conf * 180.0f / PI);
             if (!is_t_L_pointRight_find && LCONF_MIN < conf && conf < LCONF_MAX)
             {

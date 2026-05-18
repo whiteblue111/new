@@ -191,9 +191,9 @@ void Cross::cross_find_farline(cv::Mat &img,
         L_right_found = true;
     }
     if (far_left_x0  < 0 || far_left_x0  >= COLSIMAGE
-     || far_left_y0  < 0 || far_left_y0  >= ROWSIMAGE
+     || far_left_y0  < 0 || far_left_y0  >= ROI_H
      || far_right_x0 < 0 || far_right_x0 >= COLSIMAGE
-     || far_right_y0 < 0 || far_right_y0 >= ROWSIMAGE)
+     || far_right_y0 < 0 || far_right_y0 >= ROI_H)
     {
         return;
     }
@@ -213,8 +213,8 @@ void Cross::cross_find_farline(cv::Mat &img,
             && img.at<unsigned char>(y1,     far_right_x0) > 128)
             break;
     }
-    /* 巡线起点应落在 ROI 内（y > ROI_TOP-10 = 30，保留 temp_repo 30 的下限） */
-    if (y0 > 30 && L_left_found)
+    /* 巡线起点应落在 ROI 有效行内（局部 y > 0，对应原全图 y > ROI_TOP） */
+    if (y0 > 0 && L_left_found)
     {
         findline_lefthand_adaptive(img, block_size, clip_value, far_left_x0, y0,
                                    far_pointsEdgeLeft, far_pointsEdgeLeft_size);
@@ -223,7 +223,7 @@ void Cross::cross_find_farline(cv::Mat &img,
     {
         far_pointsEdgeLeft_size = 0;
     }
-    if (y1 > 30 && L_right_found)
+    if (y1 > 0 && L_right_found)
     {
         findline_righthand_adaptive(img, block_size, clip_value, far_right_x0, y1,
                                     far_pointsEdgeRight, far_pointsEdgeRight_size);

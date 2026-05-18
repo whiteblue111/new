@@ -92,9 +92,9 @@ public:
                   int t_L_pointLeft_id, int t_L_pointRight_id,
                   cv::Mat imgBinary);
 
-    /* ===== 行扫描参数（适配 ROI[40,160)） ===== */
-    int rowstart = (ROI_BOTTOM - 5);    /* 行扫描起点 = 155 */
-    int rowup    = (ROI_TOP - 10);      /* 行扫描终点 = 30  */
+    /* ===== 行扫描参数（bin_img 320x130，ROI 局部行号） ===== */
+    int rowstart = (ROI_H - 5);         /* 125，局部底行 */
+    int rowup    = 5;                   /* 局部顶行缓冲 */
 
     int thresOTSU = 128;
 
@@ -175,7 +175,7 @@ public:
 
     int block_size = 9;
     int clip_value = 3;
-    double pixel_per_meter = 222.222;
+    double pixel_per_meter = 88.88;
     double SAMPLE_DIST     = 0.02;
     double ROAD_WIDTH      = 0.45;
 
