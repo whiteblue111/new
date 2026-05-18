@@ -97,7 +97,7 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
         {
             cv::Point lm = find_left_mid(40);
             if (L_left_mid_found && is_right_straight && !is_left_straight
-                && lm.y > (ROI_TOP + 60))
+                && lm.y > 60)   /* ROI 局部行号，对应原全图 ROI_TOP+60 */
             {
                 if (t_pointsEdgeRight_size > 0
                     && std::fabs((float)(t_pointsEdgeRight[t_pointsEdgeRight_size - 1].x
@@ -113,7 +113,7 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
         {
             cv::Point rm = find_right_mid(40);
             if (L_right_mid_found && is_left_straight && !is_right_straight
-                && rm.y > (ROI_TOP + 60))
+                && rm.y > 60)
             {
                 if (t_pointsEdgeLeft_size > 0
                     && std::fabs((float)(t_pointsEdgeLeft[t_pointsEdgeLeft_size - 1].x
@@ -404,7 +404,7 @@ void Ring::ring_find_line(cv::Mat &img, int /*y_start*/)
         if (img.at<unsigned char>(row, base_x) < thresOTSU) break;
 
         /* 搜右线 */
-        for (int x = base_x - 10; x < COLSIMAGE; x++)
+        for (int x = base_x - 10; x < COLSIMAGE - 1; x++)
         {
             if (x > COLSIMAGE - 5)
             {
@@ -741,7 +741,7 @@ void Ring::entering_track_far_line(cv::Mat imgBinary)
     s_b_t_far_entering_edge.clear(); s_b_t_far_entering_edge_size = 0;
 
     if (entering_x0 < 0 || entering_x0 >= COLSIMAGE
-     || entering_y0 < 6 || entering_y0 >= ROWSIMAGE)
+     || entering_y0 < 6 || entering_y0 >= ROI_H)
         return;
 
     int y0 = entering_y0 - 5;
@@ -788,7 +788,7 @@ void Ring::exiting_track_far_line(cv::Mat imgBinary)
     s_b_t_far_exiting_edge.clear(); s_b_t_far_exiting_edge_size = 0;
 
     if (exiting_x0 < 0 || exiting_x0 >= COLSIMAGE
-     || exiting_y0 < 6 || exiting_y0 >= ROWSIMAGE)
+     || exiting_y0 < 6 || exiting_y0 >= ROI_H)
         return;
 
     int y0 = exiting_y0 - 5;

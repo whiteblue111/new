@@ -17,10 +17,10 @@
 
 #include "general.hpp"
 #include <opencv2/opencv.hpp>
-extern unsigned short const Array_forward_bird_row[38400];
-extern unsigned short const Array_forward_bird_col[38400];
-extern unsigned short const Array_backward_bird_row[38400];
-extern unsigned short const Array_backward_bird_col[38400];
+extern unsigned short const Array_forward_bird_row[41600];
+extern unsigned short const Array_forward_bird_col[41600];
+extern unsigned short const Array_backward_bird_row[41600];
+extern unsigned short const Array_backward_bird_col[41600];
 
 
 /**

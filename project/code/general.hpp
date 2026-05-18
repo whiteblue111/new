@@ -23,24 +23,25 @@
 
 
 /* ====================== 图像 / 控制全局参数 ====================== */
-#ifndef COLSIMAGE
+
 #define COLSIMAGE       320     /* 图像宽（列） */
-#endif
-#ifndef ROWSIMAGE
+
+
 #define ROWSIMAGE       240     /* 图像高（行） */
-#endif
-#ifndef ROI_TOP
-#define ROI_TOP         40      /* 巡线 ROI：裁去图像顶部行数 */
-#endif
-#ifndef ROI_BOTTOM_CUT
+
+
+#define ROI_TOP         30      /* 巡线 ROI：裁去图像顶部行数 */
+
+
 #define ROI_BOTTOM_CUT  80      /* 巡线 ROI：裁去图像底部行数 */
-#endif
-#ifndef ROI_BOTTOM
+
+
 #define ROI_BOTTOM      (ROWSIMAGE - ROI_BOTTOM_CUT)    /* 巡线 ROI 底边 y（不含） = 160 */
-#endif
-#ifndef ROI_H
-#define ROI_H           (ROI_BOTTOM - ROI_TOP)          /* 巡线 ROI 高度 = 120 */
-#endif
+
+
+#define ROI_H           (ROI_BOTTOM - ROI_TOP)          /* 巡线 ROI 高度 = 130 */
+#define IMAGE_CUT_H     (ROI_BOTTOM - ROI_TOP)
+
 
 /* 单边巡线最大点数（迷宫法步数上限） */
 #ifndef POINTS_MAX_LEN
@@ -62,10 +63,10 @@
 #define PI              (3.1415926535898f)
 #endif
 
-  extern const unsigned short Array_forward_bird_row[38400];
-  extern const unsigned short Array_forward_bird_col[38400];
-  extern const unsigned short Array_backward_bird_row[38400];
-  extern const unsigned short Array_backward_bird_col[38400];
+  extern const unsigned short Array_forward_bird_row[41600];
+  extern const unsigned short Array_forward_bird_col[41600];
+  extern const unsigned short Array_backward_bird_row[41600];
+  extern const unsigned short Array_backward_bird_col[41600];
 /**
  * @brief 二维边线点结构体
  * @note 在巡线流水线中复用：原图坐标 / 透视坐标 / 角度计算结果 都用同一结构

@@ -11,14 +11,14 @@
  *                                          + blur + resample + 角度 + NMS + 找拐点
  *   Cross_Check / Cross_Run            → 十字状态机
  *   Ring_Check  / Ring_Run             → 环岛状态机
- *   fitting() → t_CenterEdge           → 双预瞄点 aim_angle = atan(预瞄点)
+ *   fitting() → normalizeCenterEdge → CenterEdge → computeAimAngle()
  *   Image_Error_Get() → img_err
  *
  * 关键参数：
- *   - 摄像头分辨率 320x240
- *   - 巡线 ROI：y∈[40, 160)，对应 ROI_TOP=40 / ROI_BOTTOM=160
- *   - rowCutBottom=155, rowCutUp=45（落在 ROI 内 5 行缓冲）
- *   - 起点 floodFill 种子点在 ROI_BOTTOM-1 = 159
+ *   - 摄像头分辨率 320x240；bin_img / gray_cut 为 ROI 裁剪 320x130
+ *   - 巡线 ROI：全图 y∈[ROI_TOP, ROI_BOTTOM) = [30, 160)
+ *   - rowCutBottom/rowCutUp 为全图行号；trackRecognition 使用 rowCut*_roi 局部行号
+ *   - floodFill 种子点局部行 seed_y_roi = ROI_H - 1 = 129
  */
 
 #include "general.hpp"
@@ -31,12 +31,15 @@
 
 
 /* ====================== ROI / 巡线常量 ====================== */
-#define rowCutBottom     (ROI_BOTTOM - 5)   /* 155，落在 ROI 内 5 行缓冲 */
-#define rowCutUp         (ROI_TOP + 5)      /* 45 */
+#define rowCutBottom     (ROI_BOTTOM - 5)   /* 155，全图行号 */
+#define rowCutUp         (ROI_TOP + 5)      /* 45，全图行号 */
+#define rowCutBottom_roi (ROI_H - 5)        /* 125，ROI 局部行号（bin 320x130） */
+#define rowCutUp_roi     5                 /* 15，ROI 局部行号 */
+#define seed_y_roi       (ROI_H - 1)       /* 129，floodFill 种子局部行 */
 #define WIDTH            COLSIMAGE
 #define LCONF_MIN        70
 #define LCONF_MAX        130
-#define IMAGE_CUT_H      120
+
 
 
 /**
@@ -53,9 +56,15 @@ enum class Scene
 /* ====================== 全局图像 ====================== */
 extern cv::Mat rgb_img;     /* 摄像头 BGR 原图（NCNN 输入） */
 extern cv::Mat gray_img;    /* 灰度图（与 rgb_img 同尺寸） */
+<<<<<<< HEAD
 extern cv::Mat gray_bird_img; /* 透视变换后的灰度图（与 rgb_img 同尺寸） */
 extern cv::Mat bin_img;     /* OTSU + 闭运算后的二值图 */
 extern cv::Mat bin_bird_img; /* 透视变换后的二值图（与 rgb_img 同尺寸） */
+=======
+extern cv::Mat gray_cut_img; /* 灰度图裁剪（巡线主流水线输入） */
+extern cv::Mat bin_img;     /* OTSU + 闭运算后的二值图 */
+extern cv::Mat bin_bird_img; /* 透视后的二值图 */
+>>>>>>> temp-branch
 extern cv::Mat imgShow;     /* 可视化用图（en_show=false 时仅作占位） */
 
 
@@ -107,11 +116,11 @@ extern int   scene;     /* NormalScene / CrossScene / RingScene */
  * @return           取帧成功为 true
  * @note             内部对 raw_img / gray_img 做 flip(-1)（沿用本工程相机安装方向）
  */
-bool image_get(lq_camera_ex &camera, cv::Mat &raw_img, cv::Mat &gray_img);
+bool image_get(lq_camera_ex &camera, cv::Mat &raw_img, cv::Mat &gray_img, cv::Mat &cut_gray_img);
 
 /**
  * @brief 巡线主流水线
- * @sample image_get(camera, rgb_img, gray_img); image_process();
+ * @sample image_get(camera, rgb_img, gray_img, cut_gray_img); image_process();
  * @note   读 rgb_img / gray_img 全局 → 计算 aim_angle 与 img_err 写回全局
  *         不依赖任何 1D 边线数组，所有结果在 vector<POINT> 全局中
  */
