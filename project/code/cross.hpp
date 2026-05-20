@@ -53,6 +53,14 @@ public:
     Cross();
 
     /**
+     * @brief 将十字状态机复位为 Cross_None，并清零计数器与远线缓存
+     * @return 无
+     * @sample cross.reset();
+     * @note  供按键/调试调用；下一帧 Cross_Check 从 None 重新判定
+     */
+    void reset();
+
+    /**
      * @brief 十字识别（仅状态转移，不修改边线）
      * @param is_L_left_found   左 L 角点是否找到
      * @param is_L_right_found  右 L 角点是否找到

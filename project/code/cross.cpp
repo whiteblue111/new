@@ -19,6 +19,60 @@ Cross::Cross()
 
 
 /**
+ * @brief 将十字状态机复位为 Cross_None，并清零计数器与远线缓存
+ * @return 无
+ * @sample cross.reset();
+ * @note  避免 Cross_Out 残留 far_* 边线影响下一帧
+ */
+void Cross::reset()
+{
+    flag_cross  = Cross_None;
+    state_cross = Cross_Both;
+
+    Cross_counter            = 0;
+    left_cross_in_counter    = 0;
+    right_cross_in_counter   = 0;
+    both_L_find_counter      = 0;
+    no_line_counter          = 0;
+
+    is_far_t_L_pointLeft_find  = false;
+    is_far_t_L_pointRight_find = false;
+    L_left_found               = false;
+    L_right_found              = false;
+    is_make_line               = false;
+
+    far_pointsEdgeLeft.clear();
+    far_pointsEdgeRight.clear();
+    far_t_pointsEdgeLeft.clear();
+    far_t_pointsEdgeRight.clear();
+    far_b_t_pointsEdgeLeft.clear();
+    far_b_t_pointsEdgeRight.clear();
+    far_s_b_t_pointsEdgeLeft.clear();
+    far_s_b_t_pointsEdgeRight.clear();
+    far_a_t_pointsEdgeLeft.clear();
+    far_a_t_pointsEdgeRight.clear();
+    far_n_a_t_pointsEdgeLeft.clear();
+    far_n_a_t_pointsEdgeRight.clear();
+
+    far_pointsEdgeLeft_size        = 0;
+    far_pointsEdgeRight_size       = 0;
+    far_t_pointsEdgeLeft_size      = 0;
+    far_t_pointsEdgeRight_size     = 0;
+    far_b_t_pointsEdgeLeft_size    = 0;
+    far_b_t_pointsEdgeRight_size   = 0;
+    far_s_b_t_pointsEdgeLeft_size  = 0;
+    far_s_b_t_pointsEdgeRight_size = 0;
+    far_a_t_pointsEdgeLeft_size    = 0;
+    far_a_t_pointsEdgeRight_size   = 0;
+    far_n_a_t_pointsEdgeLeft_size  = 0;
+    far_n_a_t_pointsEdgeRight_size = 0;
+
+    far_t_L_pointLeft_id  = 0;
+    far_t_L_pointRight_id = 0;
+}
+
+
+/**
  * @brief 十字识别（仅状态转移，不修改边线）
  * @sample 见 cross.hpp
  * @note   进入条件需连续两帧满足下列三种之一：

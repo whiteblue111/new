@@ -15,7 +15,11 @@ using namespace cv;
 int red_area = 0; // 全局变量，记录当前检测到的红色区域面积
 float aspect_ratio = 0.0f; // 全局变量，记录当前检测到
 
-extern volatile sig_atomic_t g_dbg_stage_id;
+volatile sig_atomic_t g_dbg_stage_id = 0;
+bool  g_is_bypassing_binoculars = false;
+int   g_bypass_timer            = 0;
+const int   BYPASS_MAX_FRAMES   = 80;
+const float BYPASS_OFFSET       = 30.0f;
 
 // 实例化一个本文件内部使用的检测器
 static RedRectDetector my_detector;

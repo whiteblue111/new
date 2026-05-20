@@ -81,6 +81,10 @@ aux_source_directory(../../libraries/zf_components/seekfree_assistant DIR_SRCS)
 
 # 生成可执行文件 & 配置属性
 add_executable(${PROJ_NAME} ${DIR_SRCS})
+
+option(TRACK_DEBUG_LEVEL "Track debug: 0=off 1=HUD 2=HUD+serial" 1)
+target_compile_definitions(${PROJ_NAME} PRIVATE TRACK_DEBUG_LEVEL=${TRACK_DEBUG_LEVEL})
+
 set_target_properties(${PROJ_NAME} PROPERTIES
     INSTALL_RPATH "/opt/ls_2k0300_env/opencv_4_10_build/lib"
     BUILD_WITH_INSTALL_RPATH ON

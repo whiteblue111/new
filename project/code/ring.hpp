@@ -45,7 +45,12 @@ public:
 
     Ring();
 
-    /** 重置内部状态（计数器、角点查找标志等） */
+    /**
+     * @brief 将环岛状态机复位为 Ring_None，并清零计数器与角点缓存
+     * @return 无
+     * @sample ring.reset();
+     * @note  供按键/调试调用；下一帧 Ring_Check 从 None 重新判定
+     */
     void reset();
 
     /**

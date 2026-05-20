@@ -15,6 +15,11 @@
 #include "imgproc.hpp"
 #include "image.hpp"
 #include "elements.hpp"
+#include "display.hpp"
+#include "my_key.hpp"
+#include "motor.hpp"
+#include "vision.hpp"
+#include "redbrick.hpp"
 
 #include <opencv2/opencv.hpp>
 #include <cstdio>
@@ -24,6 +29,14 @@
 #include <string>
 
 using namespace cv;
+
+#define TRACK_DEBUG_LEVEL 2
+
+/** 1=恢复 5ms 速度环 + 6ms 角度环；验证阶段建议低速 g_target_speed */
+#define ENABLE_MOTOR_CLOSED_LOOP 1
+
+/** 1=主循环调用 NCNN 碑识别 + 红砖避障状态机 */
+#define ENABLE_VISION_BRICK      1
 
 
 /* ====================== 模型 / 设备对象 ====================== */
@@ -99,6 +112,13 @@ static inline void flatten_points(const std::vector<POINT> &pts, int size,
                                   uint16 *x_buf, uint16 *y_buf)
 {
     int n = (size < POINTS_MAX_LEN) ? size : POINTS_MAX_LEN;
+    
+    if (n == 0) {
+        // 如果压根没有点，全置 0 即可
+        for (int i = 0; i < POINTS_MAX_LEN; i++) { x_buf[i] = 0; y_buf[i] = 0; }
+        return;
+    }
+
     for (int i = 0; i < n; i++)
     {
         int x = pts[i].x;
@@ -110,7 +130,12 @@ static inline void flatten_points(const std::vector<POINT> &pts, int size,
         x_buf[i] = (uint16)x;
         y_buf[i] = (uint16)y;
     }
-    for (int i = n; i < POINTS_MAX_LEN; i++) { x_buf[i] = 0; y_buf[i] = 0; }
+    
+    // 【修改】：使用最后一个有效坐标去填充余下的部分，避免连线飞回 (0,0)
+    for (int i = n; i < POINTS_MAX_LEN; i++) { 
+        x_buf[i] = x_buf[n - 1]; 
+        y_buf[i] = y_buf[n - 1]; 
+    }
 }
 
 
@@ -141,6 +166,7 @@ int main()
     imu_init();
     ips200.init(FB_PATH);
     display_init(&ips200);
+    my_key_init();
     vision_init();
 
     /* ---------- 退出注册 ---------- */
@@ -154,7 +180,7 @@ int main()
     {
         seekfree_assistant_interface_init(tcp_send_wrap, tcp_read_wrap);
         seekfree_assistant_camera_information_config(
-            SEEKFREE_ASSISTANT_GRAY, bin_cut_image[0], 320, 130);
+            SEEKFREE_ASSISTANT_GRAY, gray_cut_image[0], 320, 130);
         /* XY_BOUNDARY：3 条边线，每条 POINTS_MAX_LEN 点 */
         seekfree_assistant_camera_boundary_config(
             XY_BOUNDARY, POINTS_MAX_LEN,
@@ -170,8 +196,14 @@ int main()
         return -1;
     }
 
-    /* ---------- 角度环定时器（6ms） ---------- */
-    // img_timer.init_ms(6, yaw_callback_speed);
+#if ENABLE_MOTOR_CLOSED_LOOP
+    g_target_speed = 0.5f;
+    pit_timer.init_ms(5, pit_callback_speed);
+    img_timer.init_ms(6, yaw_callback_speed);
+    printf("[main] 闭环已开: 速度环 5ms + 角度环 6ms, target=%.2f\n", g_target_speed);
+#else
+    printf("[main] 开环图像验证模式（未启动电机定时器）\n");
+#endif
 
     printf("[main] 初始化完成，开始主循环\n");
 
@@ -180,13 +212,37 @@ int main()
     {
         if (!image_get(camera, rgb_img, gray_img, gray_cut_img)) continue;
 
+#if ENABLE_VISION_BRICK
+        process_car_vision(rgb_img);
+        g_brick_avoider.process(rgb_img, false);
+#endif
+
         /* -------- 巡线主流水线 -------- */
         image_process();
         img_err = Image_Error_Get();
+        my_key_poll();
+
+#if ENABLE_VISION_BRICK
+        if (g_brick_avoider.get_state() == RB_STATE_AVOIDING
+         || g_brick_avoider.get_state() == RB_STATE_RETURNING)
+        {
+            img_err += g_brick_avoider.get_avoid_offset() * 0.08f;
+        }
+#endif
 
         static int disp_cnt = 0;
         if (++disp_cnt % 3 == 0)
+        {
             display_show_track();
+#if TRACK_DEBUG_LEVEL >= 1
+            display_show_debug_hud_phase_c();
+            display_show_debug_hud_phase_d();
+#endif
+        }
+#if TRACK_DEBUG_LEVEL >= 2
+        track_debug_print_phase_c_throttled();
+        track_debug_print_phase_d_throttled();
+#endif
 
         /* -------- 每 5 帧发一次给逐飞助手 -------- */
         static int send_cnt = 0;
@@ -194,17 +250,17 @@ int main()
         if (send_now)
         {
             /* 320×120 灰度图 */
-            if (bin_img.rows == 130 && bin_img.cols == 320)
+            if (gray_cut_img.rows == 130 && gray_cut_img.cols == 320)
             {
-                if (bin_img.isContinuous())
+                if (gray_cut_img.isContinuous())
                 {
-                    memcpy(bin_cut_image[0], bin_img.data, 320 * 130);
+                    memcpy(gray_cut_image[0], gray_cut_img.data, 320 * 130);
                 }
                 else
                 {
                     for (int r = 0; r < 130; ++r)
                     {
-                        memcpy(bin_cut_image[0] + r * 320, bin_img.ptr<uint8_t>(r), 320);
+                        memcpy(gray_cut_image[0] + r * 320, gray_cut_img.ptr<uint8_t>(r), 320);
                     }
                 }
             }

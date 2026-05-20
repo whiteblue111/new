@@ -16,8 +16,25 @@ void draw_points(float pts[][2], int num, int y_off, uint16 color);
  * @brief 在 IPS200 上显示未透视二值 ROI 与最终中线
  * @return 无
  * @sample display_init(&ips200); display_show_track();
- * @note   读取全局 bin_img、CenterEdge；X 缩放到屏宽 240，Y 与 ROI 行号对齐
+ * @note   读取全局 bin_img；X 缩放到屏宽 240；绿/蓝为 ROI 边线，黄为 t_pointsEdge、红为 t_CenterEdge 俯视直绘
  */
 void display_show_track(void);
-  
+
+/**
+ * @brief 阶段 C HUD：原图/俯视图边线点数与 L 角点标志
+ * @return 无
+ * @sample display_show_debug_hud_phase_c();
+ * @note  需在 image_process() 之后调用；文字显示在 y=200、265
+ */
+void display_show_debug_hud_phase_c(void);
+
+/**
+ * @brief 阶段 D~G HUD：偏差角、归一化、巡线侧、场景与十字/环岛标志
+ * @return 无
+ * @sample display_show_debug_hud_phase_d();
+ * @note  需在 image_process() 与 Image_Error_Get() 之后调用；
+ *        y=250 为 Cross:/Ring: 可读状态；y=280/295 为数值 HUD（含 X:/R:）
+ */
+void display_show_debug_hud_phase_d(void);
+
 #endif  

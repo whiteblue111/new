@@ -18,6 +18,8 @@ Ring::Ring() {}
 
 void Ring::reset()
 {
+    flag_ring = Ring_None;
+
     exiting_loseline_flag = false;
     L_left_down_found  = false;
     L_left_mid_found   = false;
@@ -95,7 +97,7 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
         }
         if (left_no_size > 12)
         {
-            cv::Point lm = find_left_mid(40);
+            cv::Point lm = find_left_mid(115);
             if (L_left_mid_found && is_right_straight && !is_left_straight
                 && lm.y > 60)   /* ROI 局部行号，对应原全图 ROI_TOP+60 */
             {
@@ -111,7 +113,7 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
         }
         else if (right_no_size > 12)
         {
-            cv::Point rm = find_right_mid(40);
+            cv::Point rm = find_right_mid(115);
             if (L_right_mid_found && is_left_straight && !is_right_straight
                 && rm.y > 60)
             {

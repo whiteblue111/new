@@ -8,7 +8,8 @@
  *                                          + blur + resample + 角度 + NMS + 找拐点
  *   Cross_Check / Cross_Run            → 十字状态机
  *   Ring_Check  / Ring_Run             → 环岛状态机
- *   fitting() → normalizeCenterEdge → CenterEdge → computeAimAngle()
+ *   fitting() → normalizeCenterEdge → CenterEdge
+ *   Image_Error_Get() → 中线像素偏差 → img_err
  */
 
 #include "image.hpp"
@@ -43,7 +44,6 @@ std::vector<POINT> n_a_t_pointsEdgeLeft;
 std::vector<POINT> n_a_t_pointsEdgeRight;
 std::vector<POINT> t_left_CenterEdge;
 std::vector<POINT> t_right_CenterEdge;
-std::vector<POINT> t_both_CenterEdge;
 std::vector<POINT> t_CenterEdge;
 std::vector<POINT> CenterEdge;
 
@@ -61,7 +61,6 @@ int n_a_t_pointsEdgeLeft_size  = 0;
 int n_a_t_pointsEdgeRight_size = 0;
 int t_left_CenterEdge_size     = 0;
 int t_right_CenterEdge_size    = 0;
-int t_both_CenterEdge_size     = 0;
 int t_CenterEdge_size          = 0;
 int CenterEdge_size            = 0;
 
@@ -93,10 +92,6 @@ static const int      thresOTSU        = 128;
 static const double   pixel_per_meter  = 88.88;
 static const double   SAMPLE_DIST      = 0.02;
 static const double   ROAD_WIDTH       = 0.45;
-static const double   car_length       = 0.18;   /* 米 */
-static const double   aim_distance_f     = 0.55;
-static const double   aim_distance_n     = 0.25;
-static const double   aim_distance_ring  = 0.60;
 static const int      approx_num       = 3;
 static const double   dist_half_road   = pixel_per_meter * ROAD_WIDTH / 2.0;
 
@@ -130,7 +125,6 @@ static void find_corners();
 static void trackRecognition(cv::Mat &imageBinary);
 static void fitting();
 static bool normalizeCenterEdge(float &cx, float &cy);
-static void computeAimAngle();
 
 
 /* ====================== 摄像头取帧 ====================== */
@@ -201,27 +195,55 @@ void image_process(void)
                     t_L_pointLeft_id, t_L_pointRight_id,
                     bin_img);
 
-    /* 5) scene 联动（仅作场景标记，用于 aim_angle 权重切换） */
+    /* 5) scene 联动（十字 / 环岛场景标记） */
     if (s_cross.flag_cross != Cross::Cross_None)      scene = (int)Scene::CrossScene;
     else if (s_ring.flag_ring != Ring::Ring_None)     scene = (int)Scene::RingScene;
     else                                              scene = (int)Scene::NormalScene;
 
     /* 6) 拟合中线 */
     fitting();
-
-    /* 7) 双预瞄点偏差 */
-    computeAimAngle();
 }
 
 
 /**
- * @brief 计算偏差并写入 img_err
- * @return aim_angle（单位：度）
- * @sample float err = Image_Error_Get();
- * @note   写入全局 img_err 给 motor.cpp 的角度环 PID
+ * @brief 将十字、环岛状态机复位为 None，scene 置 NormalScene
+ * @return 无
+ * @sample track_elements_reset();
+ * @note  供按键/调试调用；不修改 t_pointsEdge 边线，下一帧 trackRecognition 自然刷新
+ */
+void track_elements_reset(void)
+{
+    s_cross.reset();
+    s_ring.reset();
+    scene = (int)Scene::NormalScene;
+}
+
+
+/**
+ * @brief 中线横向像素偏差（后轮差速，无阿克曼几何）
+ * @return aim_angle 横向偏差（像素），COLSIMAGE/2 - avg_x
+ * @sample image_process(); float err = Image_Error_Get();
+ * @note   对俯视图 t_CenterEdge index 15~20 共 6 点求平均列坐标；
+ *         归一化无效或点数≤20 时沿用 aim_angle_last；
+ *         写入 img_err 供 motor.cpp yaw_loop / pd_yaw。
+ *         中线偏右时 avg_x 大，偏差为负。
  */
 float Image_Error_Get(void)
 {
+    if (!s_center_effective || t_CenterEdge_size <= 20)
+    {
+        aim_angle = aim_angle_last;
+    }
+    else
+    {
+        int sum_x = 0;
+        for (int i = 15; i <= 20; i++)
+            sum_x += t_CenterEdge[i].x;
+        const float avg_x = (float)sum_x / 6.0f;
+        aim_angle = (float)(COLSIMAGE / 2) - avg_x;
+        aim_angle_last = aim_angle;
+    }
+
     img_err = aim_angle;
     return aim_angle;
 }
@@ -456,18 +478,84 @@ static void trackRecognition(cv::Mat &imageBinary)
 }
 
 
+/** @brief 巡线侧选择（对齐 standard.cpp TrackState，不含双边贝塞尔） */
+enum class TrackState
+{
+    TRACK_NONE  = 0,
+    TRACK_LEFT  = 1,
+    TRACK_RIGHT = 2,
+};
+
+static TrackState s_track_state = TrackState::TRACK_NONE;
+
+
 /**
- * @brief 拟合中线（单边 / 双边 Bezier）
- * @note  与 temp_repo Standard::fitting 对齐：
- *        - 仅左线 → t_left_CenterEdge 投影到 t_CenterEdge
- *        - 仅右线 → t_right_CenterEdge
- *        - 双线 → 4 控制点 Bezier（两端 + 1/3、2/3 处）
+ * @brief 按边线点数选定巡线侧（点多选边，差≤1 用 aim_angle_last 防抖）
+ * @note  逻辑对齐 temp_repo Standard::run 中 trackState 判定，不使用 TRACK_BOTH
+ */
+static void select_track_state(void)
+{
+    const int dl = t_pointsEdgeLeft_size;
+    const int dr = t_pointsEdgeRight_size;
+
+    if ((dr - dl) > 1)
+        s_track_state = TrackState::TRACK_RIGHT;
+    else if ((dl - dr) > 1)
+        s_track_state = TrackState::TRACK_LEFT;
+    else if (dl > dr)
+        s_track_state = TrackState::TRACK_LEFT;
+    else if (dr > dl)
+        s_track_state = TrackState::TRACK_RIGHT;
+    else if (dl > 0 && dr > 0)
+    {
+        if (aim_angle_last < 0.f)
+            s_track_state = TrackState::TRACK_LEFT;
+        else
+            s_track_state = TrackState::TRACK_RIGHT;
+    }
+    else if (dl > 0)
+        s_track_state = TrackState::TRACK_LEFT;
+    else if (dr > 0)
+        s_track_state = TrackState::TRACK_RIGHT;
+    else
+        s_track_state = TrackState::TRACK_NONE;
+}
+
+
+/**
+ * @brief 左单边中线写入 t_CenterEdge
+ * @note  对应 standard.cpp track_left 分支
+ */
+static void track_left(void)
+{
+    t_CenterEdge.clear();
+    for (int i = 0; i < t_left_CenterEdge_size; i++)
+        t_CenterEdge.emplace_back(t_left_CenterEdge[i].x, t_left_CenterEdge[i].y);
+    t_CenterEdge_size = (int)t_CenterEdge.size();
+}
+
+
+/**
+ * @brief 右单边中线写入 t_CenterEdge
+ * @note  对应 standard.cpp track_right 分支
+ */
+static void track_right(void)
+{
+    t_CenterEdge.clear();
+    for (int i = 0; i < t_right_CenterEdge_size; i++)
+        t_CenterEdge.emplace_back(t_right_CenterEdge[i].x, t_right_CenterEdge[i].y);
+    t_CenterEdge_size = (int)t_CenterEdge.size();
+}
+
+
+/**
+ * @brief 拟合中线（单边法向偏移；点多选边，不用双边 Bezier）
+ * @note  centerCompute 生成左右单边中线，select_track_state + track_left/right 选定 t_CenterEdge
  */
 static void fitting()
 {
     t_left_CenterEdge.clear();   t_left_CenterEdge_size  = 0;
     t_right_CenterEdge.clear();  t_right_CenterEdge_size = 0;
-    t_both_CenterEdge.clear();   t_both_CenterEdge_size  = 0;
     t_CenterEdge.clear();        t_CenterEdge_size       = 0;
     CenterEdge.clear();          CenterEdge_size         = 0;
 
@@ -476,31 +564,11 @@ static void fitting()
     centerCompute(t_pointsEdgeRight, t_pointsEdgeRight_size, 1);
     t_right_CenterEdge_size = (int)t_right_CenterEdge.size();
 
-    if (t_pointsEdgeLeft_size > 20 && t_pointsEdgeRight_size > 20)
-        track_both_edge();
-
-    /* 选择最终中线：优先双边 → 单边（左 / 右） */
-    if (t_both_CenterEdge_size > 0)
-    {
-        for (int i = 0; i < t_both_CenterEdge_size; i++)
-            t_CenterEdge.emplace_back(t_both_CenterEdge[i].x, t_both_CenterEdge[i].y);
-    }
-    else if (t_left_CenterEdge_size > 0 && t_right_CenterEdge_size == 0)
-    {
-        for (int i = 0; i < t_left_CenterEdge_size; i++)
-            t_CenterEdge.emplace_back(t_left_CenterEdge[i].x, t_left_CenterEdge[i].y);
-    }
-    else if (t_right_CenterEdge_size > 0 && t_left_CenterEdge_size == 0)
-    {
-        for (int i = 0; i < t_right_CenterEdge_size; i++)
-            t_CenterEdge.emplace_back(t_right_CenterEdge[i].x, t_right_CenterEdge[i].y);
-    }
-    else if (t_left_CenterEdge_size > 0)
-    {
-        for (int i = 0; i < t_left_CenterEdge_size; i++)
-            t_CenterEdge.emplace_back(t_left_CenterEdge[i].x, t_left_CenterEdge[i].y);
-    }
-    t_CenterEdge_size = (int)t_CenterEdge.size();
+    select_track_state();
+    if (s_track_state == TrackState::TRACK_LEFT)
+        track_left();
+    else if (s_track_state == TrackState::TRACK_RIGHT)
+        track_right();
 
     /* 起始点中线归一化（俯视图）：截断车前段 + 等距重采样 */
     float cx = COLSIMAGE / 2.0f;
@@ -509,58 +577,56 @@ static void fitting()
     s_track_cx = cx;
     s_track_cy = cy;
 
-    // /* 反透视：基于归一化后的 t_CenterEdge，送显 / 串口 XY_BOUNDARY */
-    // for (int i = 0; i < t_CenterEdge_size; i++)
-    // {
-    //     int a, b;
-    //     s_general.Reverse_transf(a, b, t_CenterEdge[i].x, t_CenterEdge[i].y);
-    //     CenterEdge.emplace_back(a, b);
-    // }
-    // CenterEdge_size = (int)CenterEdge.size();
+    /* 反透视：基于归一化后的 t_CenterEdge，送逐飞助手 XY_BOUNDARY（ROI 局部坐标） */
+    for (int i = 0; i < t_CenterEdge_size; i++)
+    {
+        int a, b;
+        if (s_general.Reverse_transf(a, b, t_CenterEdge[i].x, t_CenterEdge[i].y))
+            CenterEdge.emplace_back(a, b);
+        else
+            break;
+    }
+    CenterEdge_size = (int)CenterEdge.size();
 }
 
 
 /**
- * @brief 起始点中线归一化（移植 temp_repo Standard::run）
- * @param[out] cx  车体参考列（俯视图），begin_id>0 时更新为最近点列
- * @param[out] cy  车体参考行（俯视图），begin_id>0 时更新为最近点行
- * @return         true 表示截断并重采样成功，可继续预瞄
- * @note           输入/输出 t_CenterEdge 须在俯视图 [0,COLSIMAGE)×[0,ROI_H)；
- *                 调用前建议 cx=COLSIMAGE/2, cy=ROI_H*0.95
+ * @brief 按锚点与中线第一点纵向关系分两支归一化并等距重采样
+ * @param[in,out] cx  锚点列（俯视图），输入为车体参考列，输出保持不变
+ * @param[in,out] cy  锚点行（俯视图），输入为车体参考行，输出保持不变
+ * @return            true 表示重采样成功且点数足够，可继续预瞄
+ * @sample            fitting() 内: normalizeCenterEdge(cx, cy);  // cx=COLSIMAGE/2, cy=ROI_H*0.95
+ * @note              t_CenterEdge 须在俯视图 [0,COLSIMAGE)×[0,ROI_H)；y 向下增大。
+ *                    t_CenterEdge[0].y > cy：第一点已在锚点下方，保留原中线 [0,end) 后重采样；
+ *                    t_CenterEdge[0].y <= cy：第一点在上，锚点作首点再接原中线后重采样。
  */
 static bool normalizeCenterEdge(float &cx, float &cy)
 {
     if (t_CenterEdge_size <= 0)
         return false;
 
-    int begin_id = 0;
-    float min_dist = 1e9f;
-    for (int i = 0; i < t_CenterEdge_size; i++)
-    {
-        float dx = (float)t_CenterEdge[i].x - cx;
-        float dy = (float)t_CenterEdge[i].y - cy;
-        float dist = std::sqrt(dx * dx + dy * dy);
-        if (dist < min_dist)
-        {
-            min_dist = dist;
-            begin_id = i;
-        }
-    }
-
-    begin_id = s_general.clip(begin_id, 0, t_CenterEdge_size - 1);
-    if (t_CenterEdge_size - begin_id < 3)
-        return false;
-
-    if (begin_id > 0)
-    {
-        cx = (float)t_CenterEdge[begin_id].x;
-        cy = (float)t_CenterEdge[begin_id].y;
-    }
+    const float anchor_x = cx;
+    const float anchor_y = cy;
 
     std::vector<POINT> temp_center;
-    temp_center.reserve((size_t)(t_CenterEdge_size - begin_id));
-    for (int i = begin_id; i < t_CenterEdge_size; i++)
-        temp_center.emplace_back(t_CenterEdge[i].x, t_CenterEdge[i].y);
+    temp_center.reserve((size_t)t_CenterEdge_size + 1);
+
+    if ((float)t_CenterEdge[0].y > anchor_y)
+    {
+        /* 情形一：第一点已在锚点下方 → 原中线从 index 0 到末尾 */
+        for (int i = 0; i < t_CenterEdge_size; i++)
+            temp_center.emplace_back(t_CenterEdge[i].x, t_CenterEdge[i].y);
+    }
+    else
+    {
+        /* 情形二：第一点在上 → 锚点作首点，再接原中线 */
+        temp_center.emplace_back((int)(anchor_x + 0.5f), (int)(anchor_y + 0.5f));
+        for (int i = 0; i < t_CenterEdge_size; i++)
+            temp_center.emplace_back(t_CenterEdge[i].x, t_CenterEdge[i].y);
+    }
+
+    if ((int)temp_center.size() < 3)
+        return false;
 
     int temp_center_size = (int)temp_center.size();
     t_CenterEdge.clear();
@@ -568,80 +634,6 @@ static bool normalizeCenterEdge(float &cx, float &cy)
     resample_points(temp_center, temp_center_size, t_CenterEdge, t_CenterEdge_size,
                     (float)(SAMPLE_DIST * pixel_per_meter));
     return t_CenterEdge_size >= 2;
-}
-
-
-/**
- * @brief 双预瞄点 aim_angle 计算
- * @note  以归一化后的车体参考点 (s_track_cx, s_track_cy) 为原点，
- *        在 t_CenterEdge 上找最接近 aim_distance_n/f * ppm 的两个点，
- *        以 car_length 为前向几何参数计算偏差角，再加权融合。
- *        归一化无效或中线过短时复用 aim_angle_last。
- */
-static void computeAimAngle()
-{
-    if (!s_center_effective || t_CenterEdge_size < 2)
-    {
-        aim_angle = aim_angle_last;
-        return;
-    }
-
-    const double cx = s_track_cx;
-    const double cy = s_track_cy;
-
-    double aim_dist_n = aim_distance_n;
-    if (scene == (int)Scene::CrossScene)
-        aim_dist_n = 0.2;
-    else if (scene == (int)Scene::RingScene)
-        aim_dist_n = aim_distance_ring;
-
-    int aim_index_far  = 0;
-    int aim_index_near = 0;
-    double min_dis = 1e9;
-    for (int i = 1; i < t_CenterEdge_size; i++)
-    {
-        double dx = t_CenterEdge[i].x - cx;
-        double dy = cy - t_CenterEdge[i].y;
-        double dn = std::sqrt(dx * dx + dy * dy);
-        double dis = std::fabs(aim_distance_f * pixel_per_meter - dn);
-        if (dis < min_dis) { aim_index_far = i; min_dis = dis; }
-    }
-    min_dis = 1e9;
-    for (int i = 1; i < t_CenterEdge_size; i++)
-    {
-        double dx = t_CenterEdge[i].x - cx;
-        double dy = cy - t_CenterEdge[i].y;
-        double dn = std::sqrt(dx * dx + dy * dy);
-        double dis = std::fabs(aim_dist_n * pixel_per_meter - dn);
-        if (dis < min_dis) { aim_index_near = i; min_dis = dis; }
-    }
-
-    float dx_f = (float)(t_CenterEdge[aim_index_far].x - cx);
-    float dy_f = (float)(cy - t_CenterEdge[aim_index_far].y
-                       + car_length * pixel_per_meter);
-    float dn_f = std::sqrt(dx_f * dx_f + dy_f * dy_f);
-    float err_far  = -std::atan(pixel_per_meter * 2.0f * (float)car_length * dx_f
-                                 / (dn_f * dn_f)) * 180.0f / PI;
-
-    float dx_n = (float)(t_CenterEdge[aim_index_near].x - cx);
-    float dy_n = (float)(cy - t_CenterEdge[aim_index_near].y
-                       + car_length * pixel_per_meter);
-    float dn_n = std::sqrt(dx_n * dx_n + dy_n * dy_n);
-    float err_near = -std::atan(pixel_per_meter * 2.0f * (float)car_length * dx_n
-                                 / (dn_n * dn_n)) * 180.0f / PI;
-
-    if (std::isnan(err_far))  err_far  = 0.0f;
-    if (std::isnan(err_near)) err_near = 0.0f;
-
-    /* 场景权重 */
-    switch ((Scene)scene)
-    {
-        case Scene::CrossScene: aim_angle = err_near; break;
-        case Scene::RingScene:  aim_angle = err_near; break;
-        case Scene::NormalScene:
-        default:                aim_angle = err_near; break;
-    }
-    aim_angle_last = aim_angle;
 }
 
 
@@ -660,11 +652,11 @@ static void findline_lefthand_adaptive(cv::Mat &img, int /*bs*/, int /*cv*/,
                                        int x, int y,
                                        std::vector<POINT> &out, int &out_size)
 {
-    int half = block_size / 2;
+    // int half = block_size / 2;
     int step = 0, dir = 0, turn = 0;
     while ((step < POINTS_MAX_LEN)
-        && half < x && x < (img.cols - half - 1)
-        && half < y && y < (img.rows - half - 1)
+        && 0 < x && x < (img.cols  - 1)
+        && 0 < y && y < (img.rows  - 1)
         && turn < 4)
     {
         int local_thres     = 128;
@@ -930,27 +922,27 @@ static void centerCompute(std::vector<POINT> pointsEdge, int size, int side)
  * @brief 双边巡线生成中线（4 控制点贝塞尔）
  * @note  控制点取自 t_pointsEdgeLeft / t_pointsEdgeRight 的 0、1/3、2/3、末点
  */
-static void track_both_edge()
-{
-    if (t_pointsEdgeLeft_size <= 0 || t_pointsEdgeRight_size <= 0) return;
-    std::vector<POINT> v_center(4);
-    v_center[0] = POINT((t_pointsEdgeLeft[0].x + t_pointsEdgeRight[0].x) / 2,
-                        (t_pointsEdgeLeft[0].y + t_pointsEdgeRight[0].y) / 2);
-    v_center[1] = POINT((t_pointsEdgeLeft[t_pointsEdgeLeft_size / 3].x
-                        + t_pointsEdgeRight[t_pointsEdgeRight_size / 3].x) / 2,
-                        (t_pointsEdgeLeft[t_pointsEdgeLeft_size / 3].y
-                        + t_pointsEdgeRight[t_pointsEdgeRight_size / 3].y) / 2);
-    v_center[2] = POINT((t_pointsEdgeLeft[t_pointsEdgeLeft_size * 2 / 3].x
-                        + t_pointsEdgeRight[t_pointsEdgeRight_size * 2 / 3].x) / 2,
-                        (t_pointsEdgeLeft[t_pointsEdgeLeft_size * 2 / 3].y
-                        + t_pointsEdgeRight[t_pointsEdgeRight_size * 2 / 3].y) / 2);
-    v_center[3] = POINT((t_pointsEdgeLeft[t_pointsEdgeLeft_size - 1].x
-                        + t_pointsEdgeRight[t_pointsEdgeRight_size - 1].x) / 2,
-                        (t_pointsEdgeLeft[t_pointsEdgeLeft_size - 1].y
-                        + t_pointsEdgeRight[t_pointsEdgeRight_size - 1].y) / 2);
-    t_both_CenterEdge = s_general.Bezier(0.01, v_center);
-    t_both_CenterEdge_size = (int)t_both_CenterEdge.size();
-}
+// static void track_both_edge()
+// {
+//     if (t_pointsEdgeLeft_size <= 0 || t_pointsEdgeRight_size <= 0) return;
+//     std::vector<POINT> v_center(4);
+//     v_center[0] = POINT((t_pointsEdgeLeft[0].x + t_pointsEdgeRight[0].x) / 2,
+//                         (t_pointsEdgeLeft[0].y + t_pointsEdgeRight[0].y) / 2);
+//     v_center[1] = POINT((t_pointsEdgeLeft[t_pointsEdgeLeft_size / 3].x
+//                         + t_pointsEdgeRight[t_pointsEdgeRight_size / 3].x) / 2,
+//                         (t_pointsEdgeLeft[t_pointsEdgeLeft_size / 3].y
+//                         + t_pointsEdgeRight[t_pointsEdgeRight_size / 3].y) / 2);
+//     v_center[2] = POINT((t_pointsEdgeLeft[t_pointsEdgeLeft_size * 2 / 3].x
+//                         + t_pointsEdgeRight[t_pointsEdgeRight_size * 2 / 3].x) / 2,
+//                         (t_pointsEdgeLeft[t_pointsEdgeLeft_size * 2 / 3].y
+//                         + t_pointsEdgeRight[t_pointsEdgeRight_size * 2 / 3].y) / 2);
+//     v_center[3] = POINT((t_pointsEdgeLeft[t_pointsEdgeLeft_size - 1].x
+//                         + t_pointsEdgeRight[t_pointsEdgeRight_size - 1].x) / 2,
+//                         (t_pointsEdgeLeft[t_pointsEdgeLeft_size - 1].y
+//                         + t_pointsEdgeRight[t_pointsEdgeRight_size - 1].y) / 2);
+//     t_both_CenterEdge = s_general.Bezier(0.01, v_center);
+//     t_both_CenterEdge_size = (int)t_both_CenterEdge.size();
+// }
 
 
 /**
@@ -1071,4 +1063,112 @@ static void find_corners()
             else if (is_t_L_pointRight_find) break;
         }
     }
+}
+
+
+/* ====================== 阶段 C 调试 ====================== */
+
+/**
+ * @brief 从全局巡线变量填充阶段 C 快照
+ * @param out [out] 输出结构体
+ * @return  无
+ */
+void track_debug_fill_phase_c(TrackDebugSnapshotC &out)
+{
+    out.pl   = pointsEdgeLeft_size;
+    out.pr   = pointsEdgeRight_size;
+    out.tl   = t_pointsEdgeLeft_size;
+    out.tr   = t_pointsEdgeRight_size;
+    out.ll   = is_t_L_pointLeft_find  ? 1 : 0;
+    out.lr   = is_t_L_pointRight_find ? 1 : 0;
+    out.lxid = is_t_L_pointLeft_find  ? t_L_pointLeft_id  : -1;
+    out.lyid = is_t_L_pointLeft_find  ? t_L_pointLeft.y   : -1;
+    out.rxid = is_t_L_pointRight_find ? t_L_pointRight_id : -1;
+    out.ryid = is_t_L_pointRight_find ? t_L_pointRight.y  : -1;
+    out.lx   = is_t_L_pointLeft_find  ? t_L_pointLeft.x   : -1;
+    out.ly   = is_t_L_pointLeft_find  ? t_L_pointLeft.y   : -1;
+    out.rx   = is_t_L_pointRight_find ? t_L_pointRight.x  : -1;
+    out.ry   = is_t_L_pointRight_find ? t_L_pointRight.y  : -1;
+}
+
+/**
+ * @brief 阶段 C 低频串口输出
+ * @return 无
+ * @note  约每 30 帧打印一次；L 角点 0→1 时额外打印坐标
+ */
+void track_debug_print_phase_c_throttled(void)
+{
+    static int frame_cnt = 0;
+    static int last_ll   = 0;
+    static int last_lr   = 0;
+    TrackDebugSnapshotC s{};
+    track_debug_fill_phase_c(s);
+
+    if (s.ll && !last_ll)
+        printf("[C] L_corner id=%d (%d,%d)\n", s.lxid, s.lx, s.ly);
+    if (s.lr && !last_lr)
+        printf("[C] R_corner id=%d (%d,%d)\n", s.rxid, s.rx, s.ry);
+    last_ll = s.ll;
+    last_lr = s.lr;
+
+    if (++frame_cnt % 30 != 0)
+        return;
+    printf("[C] L=%d R=%d tL=%d tR=%d LL=%d LR=%d\n",
+           s.pl, s.pr, s.tl, s.tr, s.ll, s.lr);
+}
+
+
+/* ====================== 阶段 D~G 调试 ====================== */
+
+/**
+ * @brief 从全局巡线变量填充阶段 D~G 快照
+ * @param out [out] 输出结构体
+ * @return  无
+ */
+void track_debug_fill_phase_d(TrackDebugSnapshotD &out)
+{
+    out.aim_angle  = aim_angle;
+    out.center_ok  = s_center_effective ? 1 : 0;
+    out.track_cx   = (int)(s_track_cx + 0.5f);
+    out.track_cy   = (int)(s_track_cy + 0.5f);
+    out.track_state = (int)s_track_state;
+    out.scene      = scene;
+    out.cross_flag = (int)s_cross.flag_cross;
+    out.ring_flag  = (int)s_ring.flag_ring;
+    out.straight_l = is_left_straight  ? 1 : 0;
+    out.straight_r = is_right_straight ? 1 : 0;
+    out.curve_l    = is_left_curve     ? 1 : 0;
+    out.curve_r    = is_right_curve    ? 1 : 0;
+}
+
+/**
+ * @brief 阶段 D~G 低频串口输出
+ * @return 无
+ * @note  约每 30 帧打印一次；十字/环岛状态变化时额外打印
+ */
+void track_debug_print_phase_d_throttled(void)
+{
+    static int frame_cnt    = 0;
+    static int last_cross   = 0;
+    static int last_ring    = 0;
+    static int last_track   = 0;
+    TrackDebugSnapshotD s{};
+    track_debug_fill_phase_d(s);
+
+    if (s.cross_flag != last_cross)
+        printf("[G] cross_flag %d -> %d\n", last_cross, s.cross_flag);
+    if (s.ring_flag != last_ring)
+        printf("[G] ring_flag %d -> %d\n", last_ring, s.ring_flag);
+    if (s.track_state != last_track)
+        printf("[F] track_state %d -> %d (tL=%d tR=%d)\n",
+               last_track, s.track_state, t_pointsEdgeLeft_size, t_pointsEdgeRight_size);
+    last_cross = s.cross_flag;
+    last_ring  = s.ring_flag;
+    last_track = s.track_state;
+
+    if (++frame_cnt % 30 != 0)
+        return;
+    printf("[D] err=%.2f cen=%d cx=%d cy=%d | [F] trk=%d | [G] scn=%d X=%d R=%d\n",
+           s.aim_angle, s.center_ok, s.track_cx, s.track_cy,
+           s.track_state, s.scene, s.cross_flag, s.ring_flag);
 }

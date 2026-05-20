@@ -11,8 +11,8 @@
  *                                          + blur + resample + 角度 + NMS + 找拐点
  *   Cross_Check / Cross_Run            → 十字状态机
  *   Ring_Check  / Ring_Run             → 环岛状态机
- *   fitting() → normalizeCenterEdge → CenterEdge → computeAimAngle()
- *   Image_Error_Get() → img_err
+ *   fitting() → normalizeCenterEdge → CenterEdge
+ *   Image_Error_Get() → 中线像素偏差 → img_err
  *
  * 关键参数：
  *   - 摄像头分辨率 320x240；bin_img / gray_cut 为 ROI 裁剪 320x130
@@ -56,15 +56,9 @@ enum class Scene
 /* ====================== 全局图像 ====================== */
 extern cv::Mat rgb_img;     /* 摄像头 BGR 原图（NCNN 输入） */
 extern cv::Mat gray_img;    /* 灰度图（与 rgb_img 同尺寸） */
-<<<<<<< HEAD
-extern cv::Mat gray_bird_img; /* 透视变换后的灰度图（与 rgb_img 同尺寸） */
-extern cv::Mat bin_img;     /* OTSU + 闭运算后的二值图 */
-extern cv::Mat bin_bird_img; /* 透视变换后的二值图（与 rgb_img 同尺寸） */
-=======
 extern cv::Mat gray_cut_img; /* 灰度图裁剪（巡线主流水线输入） */
 extern cv::Mat bin_img;     /* OTSU + 闭运算后的二值图 */
 extern cv::Mat bin_bird_img; /* 透视后的二值图 */
->>>>>>> temp-branch
 extern cv::Mat imgShow;     /* 可视化用图（en_show=false 时仅作占位） */
 
 
@@ -77,8 +71,7 @@ extern std::vector<POINT> s_b_t_pointsEdgeLeft, s_b_t_pointsEdgeRight; /* 等距
 extern std::vector<POINT> a_t_pointsEdgeLeft, a_t_pointsEdgeRight;  /* 角度计算 */
 extern std::vector<POINT> n_a_t_pointsEdgeLeft, n_a_t_pointsEdgeRight; /* NMS */
 extern std::vector<POINT> t_left_CenterEdge, t_right_CenterEdge;    /* 单边中线 */
-extern std::vector<POINT> t_both_CenterEdge;                        /* 双边贝塞尔中线 */
-extern std::vector<POINT> t_CenterEdge;                             /* 最终选定中线 */
+extern std::vector<POINT> t_CenterEdge;                             /* 最终选定中线（点多选边） */
 extern std::vector<POINT> CenterEdge;                               /* 原图坐标的最终中线（送显） */
 
 extern int  pointsEdgeLeft_size,        pointsEdgeRight_size;
@@ -88,7 +81,6 @@ extern int  s_b_t_pointsEdgeLeft_size,  s_b_t_pointsEdgeRight_size;
 extern int  a_t_pointsEdgeLeft_size,    a_t_pointsEdgeRight_size;
 extern int  n_a_t_pointsEdgeLeft_size,  n_a_t_pointsEdgeRight_size;
 extern int  t_left_CenterEdge_size,     t_right_CenterEdge_size;
-extern int  t_both_CenterEdge_size;
 extern int  t_CenterEdge_size;
 extern int  CenterEdge_size;
 
@@ -121,18 +113,99 @@ bool image_get(lq_camera_ex &camera, cv::Mat &raw_img, cv::Mat &gray_img, cv::Ma
 /**
  * @brief 巡线主流水线
  * @sample image_get(camera, rgb_img, gray_img, cut_gray_img); image_process();
- * @note   读 rgb_img / gray_img 全局 → 计算 aim_angle 与 img_err 写回全局
+ * @note   读 rgb_img / gray_img 全局；偏差在 Image_Error_Get() 中计算
  *         不依赖任何 1D 边线数组，所有结果在 vector<POINT> 全局中
  */
 void image_process(void);
 
 /**
- * @brief 写入 img_err 并返回 aim_angle
- * @return aim_angle（单位：度，正值 = 中线偏右、需向左修正）
- * @sample float err = Image_Error_Get();
- * @note   img_err 的极性与 motor.cpp PID 角度环约定保持一致
+ * @brief 将十字、环岛状态机复位为 None，scene 置 NormalScene
+ * @return 无
+ * @sample track_elements_reset();
+ * @note  供按键/调试调用；下一帧 image_process 会按普通巡线继续
+ */
+void track_elements_reset(void);
+
+/**
+ * @brief 中线横向像素偏差，写入 img_err 并返回 aim_angle
+ * @return 横向偏差（像素），COLSIMAGE/2 - mean(t_CenterEdge[15..20].x)
+ * @sample image_process(); float err = Image_Error_Get();
+ * @note   三轮车后轮差速；中线偏右时返回值为负；实车需按像素量级重调 pd_yaw
  */
 float Image_Error_Get(void);
 
+
+/* ====================== 阶段 C 调试（透视边线 + L 角点） ====================== */
+
+/**
+ * @brief 阶段 C 调试快照（只读，供 HUD / 串口）
+ */
+struct TrackDebugSnapshotC
+{
+    int pl;   /**< pointsEdgeLeft_size */
+    int pr;   /**< pointsEdgeRight_size */
+    int tl;   /**< t_pointsEdgeLeft_size */
+    int tr;   /**< t_pointsEdgeRight_size */
+    int ll;   /**< 左 L 角点 0/1 */
+    int lr;   /**< 右 L 角点 0/1 */
+    int lxid; /**< 左 L id，未找到为 -1 */
+    int lyid;
+    int rxid;
+    int ryid;
+    int lx;   /**< 左 L 俯视图 x，未找到为 -1 */
+    int ly;
+    int rx;
+    int ry;
+};
+
+/**
+ * @brief 从全局巡线变量填充阶段 C 快照
+ * @param out [out] 输出结构体
+ * @return  无
+ */
+void track_debug_fill_phase_c(TrackDebugSnapshotC &out);
+
+/**
+ * @brief 阶段 C 低频串口输出（TRACK_DEBUG_LEVEL>=2 时调用）
+ * @return 无
+ * @note  约每 30 帧打印一次；L 角点 0→1 时额外打印坐标
+ */
+void track_debug_print_phase_c_throttled(void);
+
+
+/* ====================== 阶段 D~G 调试（偏差 / 巡线侧 / 元素状态机） ====================== */
+
+/**
+ * @brief 阶段 D~G 调试快照（只读，供 HUD / 串口）
+ */
+struct TrackDebugSnapshotD
+{
+    float aim_angle;   /**< 中线横向像素偏差 */
+    int   center_ok;   /**< normalizeCenterEdge 成功 1/0 */
+    int   track_cx;    /**< 车体参考点列（俯视图） */
+    int   track_cy;    /**< 车体参考点行（俯视图） */
+    int   track_state; /**< 0=NONE 1=LEFT 2=RIGHT */
+    int   scene;       /**< NormalScene/CrossScene/RingScene */
+    int   cross_flag;  /**< Cross::flag_Cross_e */
+    int   ring_flag;   /**< Ring::flag_ring_e */
+    int   straight_l;  /**< 左直道 0/1 */
+    int   straight_r;  /**< 右直道 0/1 */
+    int   curve_l;     /**< 左弯道 0/1 */
+    int   curve_r;     /**< 右弯道 0/1 */
+};
+
+/**
+ * @brief 从全局巡线变量填充阶段 D~G 快照
+ * @param out [out] 输出结构体
+ * @return  无
+ */
+void track_debug_fill_phase_d(TrackDebugSnapshotD &out);
+
+/**
+ * @brief 阶段 D~G 低频串口输出（TRACK_DEBUG_LEVEL>=2 时调用）
+ * @return 无
+ * @note  约每 30 帧打印一次；十字/环岛状态变化时额外打印
+ */
+void track_debug_print_phase_d_throttled(void);
 
 #endif /* IMAGE_HPP */

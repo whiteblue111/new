@@ -10,9 +10,8 @@
  *  - 巡线相关公用宏（图像尺寸 / 舵机 PWM 极限 / 点序列上限等）
  *  - General 类（clip / Bezier / sigma / filter / pid_realize_a / transf / Reverse_transf）
  *
- * @note 透视矩阵 src_points / dst_points 来自 temp_repo 的 Edgeboard 摄像头标定，
- *       本车摄像头视角不同，几何变换会失真。先按 temp_repo 数值占位，
- *       TODO: 用本车摄像头采图 + 棋盘格重新标定。
+ * @note 点透视 transf / Reverse_transf 使用本车实车标定单应矩阵 H（与 temp_repo 相同分式形式）；
+ *       整图俯视 image_correction 仍用 Array_forward_bird_* 打表。
  */
 
 #include <opencv2/opencv.hpp>
@@ -86,10 +85,9 @@ struct POINT
 
 /**
  * @brief 通用工具类：透视变换 + 数值工具
- * @note  - 构造时根据 src_points / dst_points 计算 change_un_Mat / Re_change_un_Mat；
- *        - transf()       : 原图坐标 → 俯视图坐标
- *        - Reverse_transf(): 俯视图坐标 → 原图坐标
- *        - 透视矩阵参数从 temp_repo/track/standard/general.h 平移，TODO 重新标定
+ * @note  - change_un_Mat：本车实车标定 H，原图 ROI (i,j) → 俯视 (ri,rj)
+ *        - Re_change_un_Mat：cv::invert(H)，俯视 → 原图
+ *        - transf / Reverse_transf 与 temp_repo 相同 3×3 分式，边界用 ROI_H
  */
 class General
 {
@@ -97,41 +95,30 @@ public:
     cv::Mat rotation;
 
     /**
-     * @brief 构造函数：根据 src_points/dst_points 自动计算正反透视矩阵
-     * @note 4 个角点取自 temp_repo 的 Edgeboard 摄像头标定，TODO 重新标定到本车摄像头
+     * @brief 构造函数：载入实车单应矩阵 H 并求逆
+     * @note  H 为原图列 i、行 j → 俯视列 x、行 y；与 temp_repo transf 形式一致
      */
     General()
     {
-        cv::Point2f src_points[4];
-        cv::Point2f dst_points[4];
+        change_un_Mat[0][0] =  1.1358;
+        change_un_Mat[0][1] =  5.8272;
+        change_un_Mat[0][2] = -17.4815;
+        change_un_Mat[1][0] =  0.0000;
+        change_un_Mat[1][1] = 5.2593;
+        change_un_Mat[1][2] = -20.8889;
+        change_un_Mat[2][0] =  0.000000;
+        change_un_Mat[2][1] = 0.0358;
+        change_un_Mat[2][2] =  1.000000;
 
-        /* ---- 反向矩阵 Re_change_un_Mat：俯视 → 原图 ---- */
-        dst_points[0] = cv::Point2f(123.0f, 105.0f);
-        dst_points[1] = cv::Point2f(195.0f, 104.0f);
-        dst_points[2] = cv::Point2f(102.0f, 135.0f);
-        dst_points[3] = cv::Point2f(211.0f, 134.0f);
-        src_points[0] = cv::Point2f(110.0f,  40.0f);
-        src_points[1] = cv::Point2f(210.0f,  40.0f);
-        src_points[2] = cv::Point2f(110.0f, 140.0f);
-        src_points[3] = cv::Point2f(210.0f, 140.0f);
-        rotation = cv::getPerspectiveTransform(src_points, dst_points);
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                Re_change_un_Mat[i][j] = rotation.at<double>(i, j);
-
-        /* ---- 正向矩阵 change_un_Mat：原图 → 俯视 ---- */
-        src_points[0] = cv::Point2f(123.0f, 105.0f);
-        src_points[1] = cv::Point2f(195.0f, 104.0f);
-        src_points[2] = cv::Point2f(102.0f, 135.0f);
-        src_points[3] = cv::Point2f(211.0f, 134.0f);
-        dst_points[0] = cv::Point2f(110.0f,  40.0f);
-        dst_points[1] = cv::Point2f(210.0f,  40.0f);
-        dst_points[2] = cv::Point2f(110.0f, 140.0f);
-        dst_points[3] = cv::Point2f(210.0f, 140.0f);
-        rotation = cv::getPerspectiveTransform(src_points, dst_points);
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                change_un_Mat[i][j] = rotation.at<double>(i, j);
+        cv::Mat Hmat = (cv::Mat_<double>(3, 3) <<
+            change_un_Mat[0][0], change_un_Mat[0][1], change_un_Mat[0][2],
+            change_un_Mat[1][0], change_un_Mat[1][1], change_un_Mat[1][2],
+            change_un_Mat[2][0], change_un_Mat[2][1], change_un_Mat[2][2]);
+        cv::Mat Hinv;
+        cv::invert(Hmat, Hinv);
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++)
+                Re_change_un_Mat[r][c] = Hinv.at<double>(r, c);
     }
 
     /**
@@ -251,68 +238,67 @@ public:
     }
 
     /**
-     * @brief 原图坐标 → 俯视图坐标
+     * @brief 原图 ROI 坐标 → 俯视图坐标（实车矩阵 H，对齐 temp_repo）
      * @param[out] ri 俯视图列坐标
      * @param[out] rj 俯视图行坐标
      * @param      i  原图列坐标
-     * @param      j  原图行坐标
-     * @return        true 表示落在俯视图有效区 [0, COLSIMAGE)×[0, ROWSIMAGE)；
-     *                false 表示越界（ri/rj 不更新）
-     * @sample        int a, b;
-     *                if (general.transf(a, b, x, y)) { ... }
+     * @param      j  原图行坐标（ROI 局部 0..ROI_H-1）
+     * @return        true 落在 [0,COLSIMAGE)×[0,ROI_H)；false 越界或 w≈0
+     * @sample        int a, b; if (general.transf(a, b, x, y)) { ... }
      */
-    // 建议加上 inline 关键字，进一步提升高频调用的速度
     bool transf(int &ri, int &rj, int i, int j) const
     {
-        // 安全防御：防止传入的 i, j 超出打表范围导致内存越界
-        // 如果你在外层循环严格控制了 i 和 j 的范围，这两行可以注释掉以压榨极致性能
-        if (i < 0 || i >= COLSIMAGE || j < 0 || j >= ROI_H) 
-                return false;
-        int index = j * COLSIMAGE + i;
-        int mapped_x = Array_forward_bird_row[index];
-        int mapped_y = Array_forward_bird_col[index];
-
-        // 如果表里存的是 -1，说明初始化时判定该点无效或越界
-        if (mapped_x == -1) 
-        {
+        if (i < 0 || i >= COLSIMAGE || j < 0 || j >= ROI_H)
             return false;
-        }
 
-        // 赋值并返回成功
-        ri = mapped_x;
-        rj = mapped_y;
-        return true;
+        const double w = change_un_Mat[2][0] * i + change_un_Mat[2][1] * j + change_un_Mat[2][2];
+        if (std::fabs(w) < 1e-9)
+            return false;
+
+        const int local_x = static_cast<int>(
+            (change_un_Mat[0][0] * i + change_un_Mat[0][1] * j + change_un_Mat[0][2]) / w);
+        const int local_y = static_cast<int>(
+            (change_un_Mat[1][0] * i + change_un_Mat[1][1] * j + change_un_Mat[1][2]) / w);
+
+        if (local_x >= 0 && local_x < COLSIMAGE && local_y >= 0 && local_y < ROI_H)
+        {
+            ri = local_x;
+            rj = local_y;
+            return true;
+        }
+        return false;
     }
-    
 
     /**
-     * @brief 俯视图坐标 → 原图坐标
-     * @param[out] ri 原图列坐标（始终更新，即使越界）
-     * @param[out] rj 原图行坐标（始终更新，即使越界）
+     * @brief 俯视图坐标 → 原图 ROI 坐标（H 的逆矩阵）
+     * @param[out] ri 原图列坐标
+     * @param[out] rj 原图行坐标
      * @param      i  俯视图列坐标
      * @param      j  俯视图行坐标
-     * @return        恒为 true（保留 temp_repo 行为）
-     * @note          落在 [0, COLSIMAGE)×[0, ROWSIMAGE) 才视为有效，但越界也会
-     *                把计算结果写回（与 temp_repo 行为一致）
+     * @return        true 落在 [0,COLSIMAGE)×[0,ROI_H)；false 越界或 w≈0
+     * @sample        int a, b; general.Reverse_transf(a, b, tx, ty);
      */
     bool Reverse_transf(int &ri, int &rj, int i, int j) const
     {
-        if (i < 0 || i >= COLSIMAGE || j < 0 || j >= ROI_H) 
-                return false;
-        int index = j * COLSIMAGE + i;
-        int mapped_x = Array_backward_bird_row[index];
-        int mapped_y = Array_backward_bird_col[index];
-
-        // 如果表里存的是 -1，说明初始化时判定该点无效或越界
-        if (mapped_x == -1) 
-        {
+        if (i < 0 || i >= COLSIMAGE || j < 0 || j >= ROI_H)
             return false;
-        }
 
-        // 赋值并返回成功
-        ri = mapped_x;
-        rj = mapped_y;
-        return true;
+        const double w = Re_change_un_Mat[2][0] * i + Re_change_un_Mat[2][1] * j + Re_change_un_Mat[2][2];
+        if (std::fabs(w) < 1e-9)
+            return false;
+
+        const int local_x = static_cast<int>(
+            (Re_change_un_Mat[0][0] * i + Re_change_un_Mat[0][1] * j + Re_change_un_Mat[0][2]) / w);
+        const int local_y = static_cast<int>(
+            (Re_change_un_Mat[1][0] * i + Re_change_un_Mat[1][1] * j + Re_change_un_Mat[1][2]) / w);
+
+        if (local_x >= 0 && local_x < COLSIMAGE && local_y >= 0 && local_y < ROI_H)
+        {
+            ri = local_x;
+            rj = local_y;
+            return true;
+        }
+        return false;
     }
 
 private:
