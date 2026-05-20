@@ -54,17 +54,15 @@ static const char *ring_status_to_text(int flag, char *out)
     const char *text = "?";
     switch (flag)
     {
-    case Ring::Ring_None:                 text = "None";  break;
-    case Ring::Left_Ring_pre_Entering:    text = "L-pre"; break;
-    case Ring::Left_Ring_Entering:        text = "L-ent"; break;
-    case Ring::Left_Ring_Inside:          text = "L-in";  break;
-    case Ring::Left_Ring_Exiting:         text = "L-out"; break;
-    case Ring::Left_Ring_Finish:          text = "L-fin"; break;
-    case Ring::Right_Ring_pre_Entering:   text = "R-pre"; break;
-    case Ring::Right_Ring_Entering:       text = "R-ent"; break;
-    case Ring::Right_Ring_Inside:         text = "R-in";  break;
-    case Ring::Right_Ring_Exiting:        text = "R-out"; break;
-    case Ring::Right_Ring_Finish:         text = "R-fin"; break;
+    case Ring::Ring_None:           text = "None";  break;
+    case Ring::Left_Ring_Find:      text = "L-FND"; break;
+    case Ring::Left_Ring_Begin:     text = "L-BEG"; break;
+    case Ring::Left_Ring_In:        text = "L-IN";  break;
+    case Ring::Left_Ring_Out:       text = "L-OUT"; break;
+    case Ring::Right_Ring_Find:     text = "R-FND"; break;
+    case Ring::Right_Ring_Begin:    text = "R-BEG"; break;
+    case Ring::Right_Ring_In:       text = "R-IN";  break;
+    case Ring::Right_Ring_Out:      text = "R-OUT"; break;
     default: break;
     }
     snprintf(out, ELEMENT_STATUS_W + 1, "%-*s", ELEMENT_STATUS_W, text);

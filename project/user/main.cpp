@@ -27,6 +27,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unistd.h>
+#if defined(__GLIBC__)
+#include <execinfo.h>
+#endif
 
 using namespace cv;
 
@@ -38,6 +42,35 @@ using namespace cv;
 /** 1=主循环调用 NCNN 碑识别 + 红砖避障状态机 */
 #define ENABLE_VISION_BRICK      1
 
+/** 1=终端打印图像偏差 img_err（像素）；0=关闭 */
+#define IMG_ERR_PRINT_ENABLE     1
+/** 每 N 帧打印一次，避免 60fps 刷屏 */
+#define IMG_ERR_PRINT_INTERVAL   15
+
+/** 1=主循环分阶段打印 [stage] N（定位 Segmentation fault）；0=关闭 */
+#define MAIN_STAGE_TRACE         1
+/** 1=注册 SIGSEGV 并打印 g_main_stage + 栈回溯；0=关闭 */
+#define CRASH_SIG_HANDLER        1
+
+/** 二分隔离：逐项置 1 可关闭对应模块，定位崩溃源 */
+#define CRASH_ISOLATE_NO_SPEED_PIT  0
+#define CRASH_ISOLATE_NO_YAW_PIT    0
+#define CRASH_ISOLATE_NO_TCP_SEND   0
+#define CRASH_ISOLATE_NO_TRACK_DBG  0
+
+/* 崩溃时最后执行到的主循环阶段（见 STAGE 宏） */
+volatile int g_main_stage = 0;
+static volatile uint32_t g_main_frame = 0;
+
+#if MAIN_STAGE_TRACE
+#define STAGE(n) do { \
+    g_main_stage = (n); \
+    fprintf(stderr, "[stage] frame=%u step=%d\n", g_main_frame, (n)); \
+    fflush(stderr); \
+} while (0)
+#else
+#define STAGE(n) do { g_main_stage = (n); } while (0)
+#endif
 
 /* ====================== 模型 / 设备对象 ====================== */
 ncnn::Net my_net;
@@ -164,8 +197,8 @@ int main()
 {
     motor_init();
     imu_init();
-    ips200.init(FB_PATH);
-    display_init(&ips200);
+    // ips200.init(FB_PATH);
+    // display_init(&ips200);
     my_key_init();
     vision_init();
 
@@ -197,10 +230,10 @@ int main()
     }
 
 #if ENABLE_MOTOR_CLOSED_LOOP
-    g_target_speed = 0.5f;
-    pit_timer.init_ms(5, pit_callback_speed);
+    g_target_speed = 0.0f;
+    pit_timer.init_ms(2, pit_callback_speed);
     img_timer.init_ms(6, yaw_callback_speed);
-    printf("[main] 闭环已开: 速度环 5ms + 角度环 6ms, target=%.2f\n", g_target_speed);
+    printf("[main] 闭环已开: 速度环 2ms + 角度环 6ms, target=%.2f\n", g_target_speed);
 #else
     printf("[main] 开环图像验证模式（未启动电机定时器）\n");
 #endif
@@ -213,8 +246,8 @@ int main()
         if (!image_get(camera, rgb_img, gray_img, gray_cut_img)) continue;
 
 #if ENABLE_VISION_BRICK
-        process_car_vision(rgb_img);
-        g_brick_avoider.process(rgb_img, false);
+        // process_car_vision(rgb_img);
+        // g_brick_avoider.process(rgb_img, false);
 #endif
 
         /* -------- 巡线主流水线 -------- */
@@ -223,11 +256,17 @@ int main()
         my_key_poll();
 
 #if ENABLE_VISION_BRICK
-        if (g_brick_avoider.get_state() == RB_STATE_AVOIDING
-         || g_brick_avoider.get_state() == RB_STATE_RETURNING)
-        {
-            img_err += g_brick_avoider.get_avoid_offset() * 0.08f;
-        }
+        // if (g_brick_avoider.get_state() == RB_STATE_AVOIDING
+        //  || g_brick_avoider.get_state() == RB_STATE_RETURNING)
+        // {
+        //     img_err += g_brick_avoider.get_avoid_offset() * 0.08f;
+        // }
+#endif
+
+#if IMG_ERR_PRINT_ENABLE
+        // static int s_img_err_print_cnt = 0;
+        // if (++s_img_err_print_cnt % IMG_ERR_PRINT_INTERVAL == 0)
+        //     printf("[img_err] %.2f px\n", img_err);
 #endif
 
         static int disp_cnt = 0;

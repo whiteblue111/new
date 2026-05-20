@@ -103,8 +103,15 @@ static bool           s_center_effective = false;
 static int            x0_seed = COLSIMAGE / 2;
 static int            x1_seed = COLSIMAGE / 2;
 
+#define EDGE_CHECK_DIS  2    /* 跳变两侧连续同色像素数，抑制毛刺 */
+#define EDGE_MARGIN     10   /* 与迷宫起点边界 x0v>10 / x1v<WIDTH-10 一致 */
+
 
 /* ====================== 内部函数声明 ====================== */
+static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int mid, int margin,
+                                       int &out_x);
+static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int mid, int margin,
+                                        int &out_x);
 static void findline_lefthand_adaptive(cv::Mat &img, int /*bs*/, int /*cv*/,
                                        int x, int y,
                                        std::vector<POINT> &out, int &out_size);
@@ -163,7 +170,7 @@ void image_process(void)
     bin_img = s_imgproc.processImage(gray_cut_img);
     if (bin_img.empty()) return;
     
-    bin_bird_img = s_imgproc.image_correction(bin_img);
+    // bin_bird_img = s_imgproc.image_correction(bin_img);
 
     /* 2) 调试可视化图（en_show=false 时仅占位） */
     /* TODO: 可视化总开关，暂时 imgShow = rgb_img 的浅拷贝即可 */
@@ -286,62 +293,81 @@ static void trackRecognition(cv::Mat &imageBinary)
     t_L_pointRight_id      = 0;
 
     /* ===== 1) floodFill：把不连通白噪声涂黑，保留赛道 ===== */
-    cv::Mat mask = cv::Mat::zeros(bin_rows + 2, bin_cols + 2, CV_8UC1);
-    bool flood_effect = false;
-    if (seedPoint.x < 0 || seedPoint.x >= bin_cols
-     || seedPoint.y < 0 || seedPoint.y >= bin_rows)
-    {
-        seedPoint = cv::Point(bin_cols / 2, bin_rows - 1);
-    }
-    if (imageBinary.at<uchar>(seedPoint.y, seedPoint.x) != 255)
-    {
-        /* 在 ROI 底边附近重新找种子点 */
-        int sy = bin_rows - 1;
-        if (aim_angle_last > 0)
-        {
-            for (int x = bin_cols / 2 - 10; x > 80; x--)
-            {
-                if (imageBinary.at<uchar>(sy, x) == 255)
-                {
-                    seedPoint = cv::Point(x, sy);
-                    flood_effect = true;
-                    break;
-                }
-            }
-        }
-        else
-        {
-            for (int x = bin_cols / 2 + 10; x < bin_cols - 80; x++)
-            {
-                if (imageBinary.at<uchar>(sy, x) == 255)
-                {
-                    seedPoint = cv::Point(x, sy);
-                    flood_effect = true;
-                    break;
-                }
-            }
-        }
-    }
-    else
-    {
-        flood_effect = true;
-    }
-    if (flood_effect)
-    {
-        cv::floodFill(imageBinary, mask, seedPoint, 127, 0, 0, 4);
-        for (int y = 0; y < bin_rows; y++)
-        {
-            for (int x = 0; x < bin_cols; x++)
-            {
-                if (imageBinary.at<uchar>(y, x) == 127)
-                    imageBinary.at<uchar>(y, x) = 255;
-                else
-                    imageBinary.at<uchar>(y, x) = 0;
-            }
-        }
-    }
-    mask.release();
+    // cv::Mat mask = cv::Mat::zeros(bin_rows + 2, bin_cols + 2, CV_8UC1);
+    // bool flood_effect = false;
+    // if (seedPoint.x < 0 || seedPoint.x >= bin_cols
+    //  || seedPoint.y < 0 || seedPoint.y >= bin_rows)
+    // {
+    //     seedPoint = cv::Point(bin_cols / 2, bin_rows - 1);
+    // }
+    // if (imageBinary.at<uchar>(seedPoint.y, seedPoint.x) != 255)
+    // {
+    //     /* 在 ROI 底边附近重新找种子点 */
+    //     int sy = bin_rows - 1;
+    //     if (aim_angle_last > 0)
+    //     {
+    //         for (int x = bin_cols / 2 - 10; x > 80; x--)
+    //         {
+    //             if (imageBinary.at<uchar>(sy, x) == 255)
+    //             {
+    //                 seedPoint = cv::Point(x, sy);
+    //                 flood_effect = true;
+    //                 break;
+    //             }
+    //         }
+    //     }
+    //     else
+    //     {
+    //         for (int x = bin_cols / 2 + 10; x < bin_cols - 80; x++)
+    //         {
+    //             if (imageBinary.at<uchar>(sy, x) == 255)
+    //             {
+    //                 seedPoint = cv::Point(x, sy);
+    //                 flood_effect = true;
+    //                 break;
+    //             }
+    //         }
+    //     }
+    // }
+    // else
+    // {
+    //     flood_effect = true;
+    // }
+    // if (flood_effect)
+    // {
+    //     cv::floodFill(imageBinary, mask, seedPoint, 127, 0, 0, 4);
+    //     for (int y = 0; y < bin_rows; y++)
+    //     {
+    //         for (int x = 0; x < bin_cols; x++)
+    //         {
+    //             if (imageBinary.at<uchar>(y, x) == 127)
+    //                 imageBinary.at<uchar>(y, x) = 255;
+    //             else
+    //                 imageBinary.at<uchar>(y, x) = 0;
+    //         }
+    //     }
+    // }
+    // mask.release();
 
+    /* ===== 2) 底行跳变：从中心向左右找迷宫起点 ===== */
+    int y0 = rowCutBottom_roi;
+    int y1 = rowCutBottom_roi;
+    int mid = bin_cols / 2;
+    int x0v = mid;
+    int x1v = mid;
+    bool found_l = find_bottom_edge_seed_left(imageBinary, y0, mid, EDGE_MARGIN, x0v);
+    bool found_r = find_bottom_edge_seed_right(imageBinary, y1, mid, EDGE_MARGIN, x1v);
+    if (found_l)
+        x0_seed = x0v;
+    else
+        x0v = x0_seed;
+    if (found_r)
+        x1_seed = x1v;
+    else
+        x1v = x1_seed;
+
+#if 0
+    /* [legacy] 最长白列 + 水平扫黑起点，已由底行跳变替代（保留备查） */
     /* ===== 2) 最长白列算法：求左右起点 x0 / x1 ===== */
     int left_start[COLSIMAGE]  = {0};
     int right_start[COLSIMAGE] = {0};
@@ -387,24 +413,38 @@ static void trackRecognition(cv::Mat &imageBinary)
                                     pointsEdgeRight, pointsEdgeRight_size);
     else
         pointsEdgeRight_size = 0;
+#endif
+
+    /* ===== 3) 迷宫法左右手巡边线 ===== */
+    if (imageBinary.at<uchar>(y0, x0v) >= thresOTSU && x0v > EDGE_MARGIN)
+        findline_lefthand_adaptive(imageBinary, block_size, clip_value, x0v, y0,
+                                   pointsEdgeLeft, pointsEdgeLeft_size);
+    else
+        pointsEdgeLeft_size = 0;
+
+    if (imageBinary.at<uchar>(y1, x1v) >= thresOTSU && x1v < WIDTH - EDGE_MARGIN)
+        findline_righthand_adaptive(imageBinary, block_size, clip_value, x1v, y1,
+                                    pointsEdgeRight, pointsEdgeRight_size);
+    else
+        pointsEdgeRight_size = 0;
 
     /* 圆形伪线过滤（直行邻接 4 点完全相同视为环形）!!!!!疑似有问题 */
-    if (pointsEdgeLeft_size > 8)
-    {
-        bool circular = true;
-        for (int i = 0; i < 4; i++)
-            if (pointsEdgeLeft[i].x != pointsEdgeLeft[i + 4].x
-             || pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
-        if (circular) pointsEdgeLeft_size = 0;
-    }
-    if (pointsEdgeRight_size > 8)
-    {
-        bool circular = true;
-        for (int i = 0; i < 4; i++)
-            if (pointsEdgeRight[i].x != pointsEdgeRight[i + 4].x
-             || pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
-        if (circular) pointsEdgeRight_size = 0;
-    }
+    // if (pointsEdgeLeft_size > 8)
+    // {
+    //     bool circular = true;
+    //     for (int i = 0; i < 4; i++)
+    //         if (pointsEdgeLeft[i].x != pointsEdgeLeft[i + 4].x
+    //          || pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
+    //     if (circular) pointsEdgeLeft_size = 0;
+    // }
+    // if (pointsEdgeRight_size > 8)
+    // {
+    //     bool circular = true;
+    //     for (int i = 0; i < 4; i++)
+    //         if (pointsEdgeRight[i].x != pointsEdgeRight[i + 4].x
+    //          || pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
+    //     if (circular) pointsEdgeRight_size = 0;
+    // }
 
     /* ===== 4) 透视变换 ===== */
     for (int i = 0; i < pointsEdgeLeft_size; i++)
@@ -495,6 +535,24 @@ static TrackState s_track_state = TrackState::TRACK_NONE;
  */
 static void select_track_state(void)
 {
+    switch (s_ring.flag_ring)
+    {
+    case Ring::Left_Ring_Find:
+    case Ring::Left_Ring_Out:
+    case Ring::Right_Ring_Begin:
+    case Ring::Right_Ring_In:
+        s_track_state = TrackState::TRACK_RIGHT;
+        return;
+    case Ring::Left_Ring_Begin:
+    case Ring::Left_Ring_In:
+    case Ring::Right_Ring_Find:
+    case Ring::Right_Ring_Out:
+        s_track_state = TrackState::TRACK_LEFT;
+        return;
+    default:
+        break;
+    }
+
     const int dl = t_pointsEdgeLeft_size;
     const int dr = t_pointsEdgeRight_size;
 
@@ -634,6 +692,102 @@ static bool normalizeCenterEdge(float &cx, float &cy)
     resample_points(temp_center, temp_center_size, t_CenterEdge, t_CenterEdge_size,
                     (float)(SAMPLE_DIST * pixel_per_meter));
     return t_CenterEdge_size >= 2;
+}
+
+
+/* ============================ 底行跳变起点 ============================ */
+
+/**
+ * @brief 在固定行上从中心向左找白→黑跳变作为左迷宫起点
+ * @param img     二值图（ROI 局部坐标）
+ * @param y       扫描行号（局部行，常用 rowCutBottom_roi）
+ * @param mid     中心列号
+ * @param margin  左右边界留白（列号下限为 margin + EDGE_CHECK_DIS）
+ * @param out_x   [out] 跳变后白侧列号
+ * @return        找到合法跳变为 true
+ * @note          取离中心最近且通过 EDGE_CHECK_DIS 连续段检验的跳变
+ */
+static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int mid, int margin,
+                                       int &out_x)
+{
+    const int cols = img.cols;
+    const int left_stop = margin + EDGE_CHECK_DIS;
+    if (y < 0 || y >= img.rows || mid < left_stop)
+        return false;
+
+    for (int x = mid; x > left_stop; --x)
+    {
+        if (img.at<uchar>(y, x) < thresOTSU || img.at<uchar>(y, x - 1) >= thresOTSU)
+            continue;
+
+        bool ok_white = true;
+        for (int k = 0; k <= EDGE_CHECK_DIS && ok_white; ++k)
+        {
+            int xi = x + k;
+            if (xi >= cols || img.at<uchar>(y, xi) < thresOTSU)
+                ok_white = false;
+        }
+        bool ok_black = true;
+        for (int k = 1; k <= EDGE_CHECK_DIS && ok_black; ++k)
+        {
+            int xi = x - k;
+            if (xi < 0 || img.at<uchar>(y, xi) >= thresOTSU)
+                ok_black = false;
+        }
+        if (ok_white && ok_black)
+        {
+            out_x = x;
+            return true;
+        }
+    }
+    return false;
+}
+
+
+/**
+ * @brief 在固定行上从中心向右找白→黑跳变作为右迷宫起点
+ * @param img     二值图（ROI 局部坐标）
+ * @param y       扫描行号（局部行，常用 rowCutBottom_roi）
+ * @param mid     中心列号
+ * @param margin  左右边界留白（列号上限为 cols - margin - EDGE_CHECK_DIS - 1）
+ * @param out_x   [out] 跳变前白侧列号
+ * @return        找到合法跳变为 true
+ * @note          取离中心最近且通过 EDGE_CHECK_DIS 连续段检验的跳变
+ */
+static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int mid, int margin,
+                                        int &out_x)
+{
+    const int cols = img.cols;
+    const int right_stop = cols - margin - EDGE_CHECK_DIS - 1;
+    if (y < 0 || y >= img.rows || mid > right_stop)
+        return false;
+
+    for (int x = mid; x < right_stop; ++x)
+    {
+        if (img.at<uchar>(y, x) < thresOTSU || img.at<uchar>(y, x + 1) >= thresOTSU)
+            continue;
+
+        bool ok_white = true;
+        for (int k = 0; k <= EDGE_CHECK_DIS && ok_white; ++k)
+        {
+            int xi = x - k;
+            if (xi < 0 || img.at<uchar>(y, xi) < thresOTSU)
+                ok_white = false;
+        }
+        bool ok_black = true;
+        for (int k = 1; k <= EDGE_CHECK_DIS && ok_black; ++k)
+        {
+            int xi = x + k;
+            if (xi >= cols || img.at<uchar>(y, xi) >= thresOTSU)
+                ok_black = false;
+        }
+        if (ok_white && ok_black)
+        {
+            out_x = x;
+            return true;
+        }
+    }
+    return false;
 }
 
 

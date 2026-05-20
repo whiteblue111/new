@@ -3,15 +3,13 @@
 
 /**
  * @file ring.hpp
- * @brief 环岛处理类（移植自 temp_repo/track/basic/ring.h）
+ * @brief 环岛处理类
  *
- * 10 态状态机（左 + 右 + None）：
- *   None → (L|R)_pre_Entering → (L|R)_Entering → (L|R)_Inside
- *        → (L|R)_Exiting → (L|R)_Finish → None
+ * 8 态状态机（左 4 + 右 4 + None）：
+ *   左环：None → Find(巡右) → Begin(巡左) → In(巡左) → Out(巡右) → None
+ *   右环：镜像（Find 巡左，Begin/In 巡右，Out 巡左）
  *
- * Ring_Check 仅负责状态机的迁移（基于角点 / 直道 / 边线长度等线索判定），
- * Ring_Run   负责按状态修改 t_pointsEdgeLeft / t_pointsEdgeRight 边线点集，
- *            进 / 出环岛时分别 entering_track_far_line / exiting_track_far_line。
+ * Ring_Check 负责状态迁移；Ring_Run 按状态裁边供 fitting() 单边中线。
  */
 
 #include "general.hpp"
@@ -26,22 +24,35 @@ class Ring
 public:
     General general;
 
+    /** 边线相位：用于丢线→复线边沿检测 */
+    enum EdgePhase_e
+    {
+        EDGE_OK   = 0,
+        EDGE_LOST = 1
+    };
+
     /** 环岛状态枚举 */
     enum flag_Ring_e
     {
         Ring_None = 0,
-        Left_Ring_pre_Entering,
-        Left_Ring_Entering,
-        Left_Ring_Inside,
-        Left_Ring_Exiting,
-        Left_Ring_Finish,
-        Right_Ring_pre_Entering,
-        Right_Ring_Entering,
-        Right_Ring_Inside,
-        Right_Ring_Exiting,
-        Right_Ring_Finish
+        Left_Ring_Find,
+        Left_Ring_Begin,
+        Left_Ring_In,
+        Left_Ring_Out,
+        Right_Ring_Find,
+        Right_Ring_Begin,
+        Right_Ring_In,
+        Right_Ring_Out
     };
     flag_Ring_e flag_ring = Ring_None;
+
+    /** 标定阈值（实车可改） */
+    static const int LOST_LINE         = 10;
+    static const int REGAIN_LINE       = 10;
+    static const int L_SMALL           = 15;
+    static const int R_LARGE           = 25;
+    static const int Y_FIND_TO_BEGIN   = 65;
+    static const int RING_COOLDOWN_MAX = 150;
 
     Ring();
 
@@ -49,7 +60,7 @@ public:
      * @brief 将环岛状态机复位为 Ring_None，并清零计数器与角点缓存
      * @return 无
      * @sample ring.reset();
-     * @note  供按键/调试调用；下一帧 Ring_Check 从 None 重新判定
+     * @note  供按键/调试调用；不修改 ring_cooldown
      */
     void reset();
 
@@ -62,8 +73,8 @@ public:
      * @param L_right_found           右 L 角点找到（外部）
      * @param t_pointsEdgeLeft_size   左透视边线点数
      * @param t_pointsEdgeRight_size  右透视边线点数
-     * @param is_L_left_found         左 L 角点找到（重复参数，与原 API 对齐）
-     * @param is_L_right_found        右 L 角点找到（重复参数）
+     * @param is_L_left_found         左 L 角点找到
+     * @param is_L_right_found        右 L 角点找到
      * @param t_L_pointLeft_id        左 L 角点下标
      * @param t_L_pointRight_id       右 L 角点下标
      * @param t_pointsEdgeLeft        左透视边线
@@ -98,8 +109,8 @@ public:
                   cv::Mat imgBinary);
 
     /* ===== 行扫描参数（bin_img 320x130，ROI 局部行号） ===== */
-    int rowstart = (ROI_H - 5);         /* 125，局部底行 */
-    int rowup    = 5;                   /* 局部顶行缓冲 */
+    int rowstart = (ROI_H - 5);
+    int rowup    = 5;
 
     int thresOTSU = 128;
 
@@ -108,7 +119,6 @@ public:
     int exiting_x0  = 0;
     int exiting_y0  = 0;
 
-    /* 行扫描得到的“整行左右白边”点集 */
     std::vector<POINT> pointsLeft;
     std::vector<POINT> pointsRight;
     std::vector<POINT> pointsMid;
@@ -122,7 +132,6 @@ public:
     int ring_points_size = 0;
     int inside_ring_points_size = 0;
 
-    /* 进 / 出环岛远线工作缓存 */
     std::vector<POINT> far_entering_edge;
     std::vector<POINT> far_exiting_edge;
     std::vector<POINT> t_far_entering_edge;
@@ -141,7 +150,6 @@ public:
     int s_b_t_far_entering_edge_size = 0;
     int s_b_t_far_exiting_edge_size  = 0;
 
-    /* L 角点查找结果 */
     bool L_left_down_found  = false;
     bool L_left_mid_found   = false;
     bool L_left_up_found    = false;
@@ -155,28 +163,12 @@ public:
     int  L_id_right_mid  = 666;
     int  L_id_right_up   = 666;
 
-    cv::Point exit_left_mid;
-    cv::Point exit_left_up;
-    cv::Point exit_right_up;
-    cv::Point exit_right_mid;
-    cv::Point last_Left_up;
-
-    int ring_inside_counter   = 0;
-    int pre_counter           = 0;
-    int exitingnum            = 0;
-    int ring_entering_counter = 0;
-    int inside_exit_flag      = 0;
-    int pre_entering_flag     = 0;
-
-    int left_no_size  = 0;
-    int right_no_size = 0;
-
-    int mid_up_dis      = 0;
-    int mid_block       = 0;
-    int ring_points_flag = 0;
-
-    bool entering_lose_line_flag = false;
-    bool exiting_loseline_flag   = false;
+    bool state_locking      = false;
+    int  right_regain_count = 0;
+    int  left_regain_count  = 0;
+    int  right_edge_phase   = EDGE_OK;
+    int  left_edge_phase    = EDGE_OK;
+    int  ring_cooldown      = 0;
 
     int block_size = 9;
     int clip_value = 3;
@@ -188,12 +180,6 @@ public:
     const int dir_frontleft[4][2]  = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
     const int dir_frontright[4][2] = {{1, -1}, {1, 1}, {-1, 1}, {-1, -1}};
 
-    /**
-     * @brief 行扫描：从中点向左右两侧找黑白跳变得到左右行白边
-     * @param img     二值图
-     * @param y_start 起始行（实际未使用，保留与 temp_repo 兼容）
-     * @note          扫描行范围 [rowup, rowstart)，写入 pointsLeft/Right/Mid
-     */
     void ring_find_line(cv::Mat &img, int y_start);
 
     cv::Point find_left_down();
@@ -203,26 +189,32 @@ public:
     cv::Point find_left_up();
     cv::Point find_right_up();
 
-    /** 左手迷宫法 */
     void findline_lefthand_adaptive(cv::Mat &img, int block_size, int clip_value,
                                     int x, int y,
                                     std::vector<POINT> &pointsEdgeLeft,
                                     int &pointsEdgeLeft_size);
-    /** 右手迷宫法 */
     void findline_righthand_adaptive(cv::Mat &img, int block_size, int clip_value,
                                      int x, int y,
                                      std::vector<POINT> &pointsEdgeRight,
                                      int &pointsEdgeRight_size);
 
-    /** side: 0=entering, 1=exiting */
     void blur_points(int side, int kernel);
     void resample_points(std::vector<POINT> &in, int in_size,
                          std::vector<POINT> &out, int &out_size, float dist);
 
-    /** 进环远线巡线（pivot=entering_x0/y0） */
     void entering_track_far_line(cv::Mat imgBinary);
-    /** 出环远线巡线（pivot=exiting_x0/y0） */
     void exiting_track_far_line(cv::Mat imgBinary);
+
+private:
+    /**
+     * @brief 边线丢线→复线边沿计数
+     * @param size          当前边线点数
+     * @param regain_count  累计复线次数（输出累加）
+     * @param phase         边线相位 EDGE_OK / EDGE_LOST
+     * @return 无
+     * @note  size < LOST_LINE 记丢线；size >= REGAIN_LINE 且曾丢线则 regain_count++
+     */
+    void update_edge_regain(int size, int &regain_count, int &phase);
 };
 
 #endif /* RING_HPP */

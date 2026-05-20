@@ -48,10 +48,10 @@ volatile int16 total_enc_r = 0;
 // PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
 // PD_Double  pd_yaw               = PD_DOUBLE_INIT(0.03f, 0.0f, 0.0f, 0.018f);  
   
-PID_Inc_Datatypedef pid_speed_l = PID_INC_INIT(90.00f, 30.00f, 0.0f);  
-PID_Inc_Datatypedef pid_speed_r = PID_INC_INIT(90.00f, 30.00f, 0.0f); 
+PID_Inc_Datatypedef pid_speed_l = PID_INC_INIT(5.00f, 15.00f, 0.0f);  
+PID_Inc_Datatypedef pid_speed_r = PID_INC_INIT(5.00f, 15.00f, 0.0f); 
 PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
-PD_Double  pd_yaw               = PD_DOUBLE_INIT(0.017f, 0.0012f, 0.010f, 0.008f); //双pd角度环
+PD_Double  pd_yaw               = PD_DOUBLE_INIT(0.017f, 0.00f, 0.00f, 0.00f); //双pd角度环 0.017 0.0012 0.010 0.008
 PID_Pos_Datatypedef pid_yaw_spd = PID_POS_INIT(0.0, 0.0, 0.0, 0.0);
 /* ====================== 增量式速度环内部累计占空比 ====================== */  
 static float duty_l_out = 0.0f;  
@@ -170,12 +170,12 @@ int get_dist ()
     // g_speed_l = motor_l.enc;  
     // g_speed_r = motor_r.enc;  
     g_speed   = 0.5f * (g_speed_l + g_speed_r);  
-    duty_l_out += PID_Inc(&pid_speed_l, g_target_speed +g_u_yaw - g_speed_l);  
-    duty_r_out += PID_Inc(&pid_speed_r, g_target_speed -g_u_yaw - g_speed_r);  
-    int duty_l = duty_l_out = (int)limit_float(duty_l_out , -MAX_PWM, MAX_PWM);  
-    int duty_r = duty_r_out = (int)limit_float(duty_r_out , -MAX_PWM, MAX_PWM);  
-    
-    motor_set_lr(duty_l, duty_r);  
+    duty_l_out += PID_Inc(&pid_speed_l, g_target_speed + g_u_yaw - g_speed_l);  
+    duty_r_out += PID_Inc(&pid_speed_r, g_target_speed - g_u_yaw - g_speed_r);  
+    duty_l_out = limit_float(duty_l_out, -MAX_PWM, MAX_PWM);  
+    duty_r_out = limit_float(duty_r_out, -MAX_PWM, MAX_PWM);  
+
+    motor_set_lr((int)duty_l_out, (int)duty_r_out);  
     // g_speed_loop_cnt++;//统计pid计算时间    
  }  
 /* ====================== 角度环（位置式，主循环调用） ====================== */  
@@ -214,13 +214,13 @@ void speed_reset()
 /* ====================== pit_callback_speed（注册给pit_timer） ====================== */  
 void pit_callback_speed()  
 {  
-    speed_parallel_5ms();  
+    speed_cascaded_5ms();
 }  
   
 /* ====================== run_speed_loop（主循环手动调用，调试用） ====================== */  
 void run_speed_loop()  
 {  
-    speed_parallel_5ms();  
+    speed_cascaded_5ms();  
 }  
 /*----------------------角度环-------------------------*/  
  void yaw_callback_speed()  
