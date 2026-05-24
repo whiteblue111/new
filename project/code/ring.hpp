@@ -5,11 +5,14 @@
  * @file ring.hpp
  * @brief 环岛处理类
  *
- * 8 态状态机（左 4 + 右 4 + None）：
- *   左环：None → Find(巡右) → Begin(巡左) → In(巡左) → Out(巡右) → None
- *   右环：镜像（Find 巡左，Begin/In 巡右，Out 巡左）
+ * 6 态状态机（左 3 + 右 3 + None）：
+ *   左环：None → Begin(巡右) → In(巡左) → Out(巡右) → None
+ *   右环：镜像（Begin/Out 巡左，In 巡右）
  *
- * Ring_Check 负责状态迁移；Ring_Run 按状态裁边供 fitting() 单边中线。
+ * Ring_Check 依赖 trackRecognition 输出的迷宫俯视图边线 t_pointsEdge 与 L 角点；
+ * Begin→In 以内侧边丢线→复线（update_edge_regain）为判据；
+ * Ring_Run 按状态裁边供 fitting() 单边中线。
+ * 旧版行扫描 ring_find_line 已 #if 0 保留，运行时不再调用。
  */
 
 #include "general.hpp"
@@ -35,11 +38,9 @@ public:
     enum flag_Ring_e
     {
         Ring_None = 0,
-        Left_Ring_Find,
         Left_Ring_Begin,
         Left_Ring_In,
         Left_Ring_Out,
-        Right_Ring_Find,
         Right_Ring_Begin,
         Right_Ring_In,
         Right_Ring_Out
@@ -49,15 +50,15 @@ public:
     /** 标定阈值（实车可改） */
     static const int LOST_LINE         = 10;
     static const int REGAIN_LINE       = 10;
-    static const int L_SMALL           = 15;
-    static const int R_LARGE           = 25;
-    static const int Y_FIND_TO_BEGIN   = 65;
-    static const int RING_COOLDOWN_MAX = 150;
+    static const int L_SMALL           = 60;
+    static const int R_LARGE           = 100;
+    static const int RING_COOLDOWN_MAX         = 150;
+    static const int RING_ENTRY_CONFIRM_FRAMES = 3;
 
     Ring();
 
     /**
-     * @brief 将环岛状态机复位为 Ring_None，并清零计数器与角点缓存
+     * @brief 将环岛状态机复位为 Ring_None，并清零计数器
      * @return 无
      * @sample ring.reset();
      * @note  供按键/调试调用；不修改 ring_cooldown
@@ -65,27 +66,25 @@ public:
     void reset();
 
     /**
-     * @brief 环岛识别（状态机迁移）
-     * @param imgBinary               二值图（CV_8UC1，320x240）
+     * @brief 环岛识别（状态机迁移，迷宫俯视图边线 + L 角点）
+     * @param imgBinary               二值图（CV_8UC1，ROI 320x130）
      * @param is_left_straight        左侧是否直道
      * @param is_right_straight       右侧是否直道
-     * @param L_left_found            左 L 角点找到（外部）
-     * @param L_right_found           右 L 角点找到（外部）
      * @param t_pointsEdgeLeft_size   左透视边线点数
      * @param t_pointsEdgeRight_size  右透视边线点数
      * @param is_L_left_found         左 L 角点找到
      * @param is_L_right_found        右 L 角点找到
-     * @param t_L_pointLeft_id        左 L 角点下标
-     * @param t_L_pointRight_id       右 L 角点下标
+     * @param t_L_pointLeft           左 L 角点（俯视图坐标）
+     * @param t_L_pointRight          右 L 角点（俯视图坐标）
      * @param t_pointsEdgeLeft        左透视边线
      * @param t_pointsEdgeRight       右透视边线
+     * @note  进环需连续 RING_ENTRY_CONFIRM_FRAMES 帧满足 L 角点与边线形态条件
      */
     void Ring_Check(cv::Mat &imgBinary,
                     bool is_left_straight, bool is_right_straight,
-                    bool L_left_found, bool L_right_found,
                     int t_pointsEdgeLeft_size, int t_pointsEdgeRight_size,
                     bool is_L_left_found, bool is_L_right_found,
-                    int t_L_pointLeft_id, int t_L_pointRight_id,
+                    cv::Point t_L_pointLeft, cv::Point t_L_pointRight,
                     std::vector<POINT> &t_pointsEdgeLeft,
                     std::vector<POINT> &t_pointsEdgeRight);
 
@@ -108,27 +107,15 @@ public:
                   int t_L_pointLeft_id, int t_L_pointRight_id,
                   cv::Mat imgBinary);
 
-    /* ===== 行扫描参数（bin_img 320x130，ROI 局部行号） ===== */
-    int rowstart = (ROI_H - 5);
-    int rowup    = 5;
-
-    int thresOTSU = 128;
-
     int entering_x0 = 0;
     int entering_y0 = 0;
     int exiting_x0  = 0;
     int exiting_y0  = 0;
 
-    std::vector<POINT> pointsLeft;
-    std::vector<POINT> pointsRight;
-    std::vector<POINT> pointsMid;
     std::vector<POINT> ring_points;
     std::vector<POINT> last_inner_side;
     std::vector<POINT> last_outer_side;
 
-    int pointsLeft_size  = 0;
-    int pointsRight_size = 0;
-    int pointsMid_size   = 0;
     int ring_points_size = 0;
     int inside_ring_points_size = 0;
 
@@ -150,25 +137,14 @@ public:
     int s_b_t_far_entering_edge_size = 0;
     int s_b_t_far_exiting_edge_size  = 0;
 
-    bool L_left_down_found  = false;
-    bool L_left_mid_found   = false;
-    bool L_left_up_found    = false;
-    bool L_right_down_found = false;
-    bool L_right_mid_found  = false;
-    bool L_right_up_found   = false;
-    int  L_id_left_down  = 666;
-    int  L_id_left_mid   = 666;
-    int  L_id_left_up    = 666;
-    int  L_id_right_down = 666;
-    int  L_id_right_mid  = 666;
-    int  L_id_right_up   = 666;
-
     bool state_locking      = false;
     int  right_regain_count = 0;
     int  left_regain_count  = 0;
     int  right_edge_phase   = EDGE_OK;
     int  left_edge_phase    = EDGE_OK;
-    int  ring_cooldown      = 0;
+    int  ring_cooldown            = 0;
+    int  left_entry_confirm_count  = 0;
+    int  right_entry_confirm_count = 0;
 
     int block_size = 9;
     int clip_value = 3;
@@ -179,15 +155,6 @@ public:
     const int dir_front[4][2]      = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
     const int dir_frontleft[4][2]  = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
     const int dir_frontright[4][2] = {{1, -1}, {1, 1}, {-1, 1}, {-1, -1}};
-
-    void ring_find_line(cv::Mat &img, int y_start);
-
-    cv::Point find_left_down();
-    cv::Point find_right_down();
-    cv::Point find_left_mid(int start);
-    cv::Point find_right_mid(int start);
-    cv::Point find_left_up();
-    cv::Point find_right_up();
 
     void findline_lefthand_adaptive(cv::Mat &img, int block_size, int clip_value,
                                     int x, int y,
@@ -204,6 +171,40 @@ public:
 
     void entering_track_far_line(cv::Mat imgBinary);
     void exiting_track_far_line(cv::Mat imgBinary);
+
+#if 0 /* 旧版行扫描（ring_find_line），仅保留对照，运行时不用 */
+    int rowstart = (ROI_H - 5);
+    int rowup    = 5;
+    int thresOTSU = 128;
+
+    std::vector<POINT> pointsLeft;
+    std::vector<POINT> pointsRight;
+    std::vector<POINT> pointsMid;
+    int pointsLeft_size  = 0;
+    int pointsRight_size = 0;
+    int pointsMid_size   = 0;
+
+    bool L_left_down_found  = false;
+    bool L_left_mid_found   = false;
+    bool L_left_up_found    = false;
+    bool L_right_down_found = false;
+    bool L_right_mid_found  = false;
+    bool L_right_up_found   = false;
+    int  L_id_left_down  = 666;
+    int  L_id_left_mid   = 666;
+    int  L_id_left_up    = 666;
+    int  L_id_right_down = 666;
+    int  L_id_right_mid  = 666;
+    int  L_id_right_up   = 666;
+
+    void ring_find_line(cv::Mat &img, int y_start);
+    cv::Point find_left_down();
+    cv::Point find_right_down();
+    cv::Point find_left_mid(int start);
+    cv::Point find_right_mid(int start);
+    cv::Point find_left_up();
+    cv::Point find_right_up();
+#endif
 
 private:
     /**

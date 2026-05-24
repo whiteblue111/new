@@ -77,7 +77,8 @@ public:
                      cv::Mat imgBinary,
                      cv::Point t_L_pointLeft, cv::Point t_L_pointRight,
                      int t_L_pointLeft_id, int t_L_pointRight_id,
-                     int t_pointsEdgeLeft_size, int t_pointsEdgeRight_size);
+                     int t_pointsEdgeLeft_size, int t_pointsEdgeRight_size,
+                     bool is_both_straight);
 
     /**
      * @brief 十字执行（Cross_Begin 截断边线、Cross_Out 巡远线）
@@ -95,7 +96,8 @@ public:
                    cv::Mat img,
                    bool is_L_left_found, bool is_L_right_found,
                    int t_L_pointLeft_id, int t_L_pointRight_id,
-                   int &t_pointsEdgeLeft_size, int &t_pointsEdgeRight_size);
+                   int &t_pointsEdgeLeft_size, int &t_pointsEdgeRight_size,
+                   bool is_both_straight);
 
 public:
     int Cross_counter = 0;

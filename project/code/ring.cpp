@@ -2,13 +2,33 @@
  * @file ring.cpp
  * @brief 环岛处理类实现
  *
- * 左环：Find(巡右) → Begin(巡左) → In(巡左) → Out(巡右) → None
- * 右环：镜像；丢复线边沿见 update_edge_regain；出环后 ring_cooldown 帧冷却。
+ * 左环：None → Begin(巡右) → In(巡左) → Out(巡右) → None
+ * 右环：镜像；识别用迷宫俯视图 t_pointsEdge + L 角点；丢复线见 update_edge_regain。
  */
 
 #include "ring.hpp"
 #include <cmath>
 #include <cstdio>
+
+
+/**
+ * @brief 外侧迷宫边线列坐标是否足够平直（预进环稳定性，对齐 temp_repo）
+ * @param edge  俯视图边线点列
+ * @param size  有效点数（不超过 edge.size()）
+ * @return      true 表示外侧边线稳定
+ */
+static bool ring_outer_edge_stable(const std::vector<POINT> &edge, int size)
+{
+    const int n = (int)edge.size();
+    if (size > n)
+        size = n;
+    if (size < 30)
+        return false;
+    const int i2 = size * 2 / 3;
+    const int i3 = size / 3;
+    return std::abs(edge[size - 1].x - edge[i2].x) < 20
+        && std::abs(edge[i3].x - edge[0].x) < 20;
+}
 
 
 Ring::Ring() {}
@@ -23,25 +43,8 @@ void Ring::reset()
     left_regain_count  = 0;
     right_edge_phase   = EDGE_OK;
     left_edge_phase    = EDGE_OK;
-
-    L_left_down_found  = false;
-    L_left_mid_found   = false;
-    L_left_up_found    = false;
-    L_right_down_found = false;
-    L_right_mid_found  = false;
-    L_right_up_found   = false;
-    L_id_left_down  = 666;
-    L_id_left_mid   = 666;
-    L_id_left_up    = 666;
-    L_id_right_down = 666;
-    L_id_right_mid  = 666;
-    L_id_right_up   = 666;
-    pointsLeft.clear();
-    pointsRight.clear();
-    pointsMid.clear();
-    pointsLeft_size  = 0;
-    pointsRight_size = 0;
-    pointsMid_size   = 0;
+    left_entry_confirm_count  = 0;
+    right_entry_confirm_count = 0;
 }
 
 
@@ -63,38 +66,16 @@ void Ring::update_edge_regain(int size, int &regain_count, int &phase)
 }
 
 
-void Ring::Ring_Check(cv::Mat &imgBinary,
+void Ring::Ring_Check(cv::Mat & /*imgBinary*/,
                       bool is_left_straight, bool is_right_straight,
-                      bool /*L_left_found_out*/, bool /*L_right_found_out*/,
                       int t_pointsEdgeLeft_size, int t_pointsEdgeRight_size,
                       bool is_L_left_found, bool is_L_right_found,
-                      int /*t_L_pointLeft_id*/, int /*t_L_pointRight_id*/,
-                      std::vector<POINT> & /*t_pointsEdgeLeft*/,
-                      std::vector<POINT> & /*t_pointsEdgeRight*/)
+                      cv::Point t_L_pointLeft, cv::Point t_L_pointRight,
+                      std::vector<POINT> &t_pointsEdgeLeft,
+                      std::vector<POINT> &t_pointsEdgeRight)
 {
-    L_left_down_found  = false;
-    L_left_mid_found   = false;
-    L_left_up_found    = false;
-    L_right_down_found = false;
-    L_right_mid_found  = false;
-    L_right_up_found   = false;
-    L_id_left_down  = 666;
-    L_id_left_mid   = 666;
-    L_id_left_up    = 666;
-    L_id_right_down = 666;
-    L_id_right_mid  = 666;
-    L_id_right_up   = 666;
-    pointsLeft.clear();
-    pointsRight.clear();
-    pointsMid.clear();
-    pointsLeft_size  = 0;
-    pointsRight_size = 0;
-    pointsMid_size   = 0;
-
     if (t_pointsEdgeLeft_size == 0 && t_pointsEdgeRight_size == 0)
         return;
-
-    ring_find_line(imgBinary, rowstart);
 
     if (flag_ring == Ring_None)
     {
@@ -104,57 +85,68 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
             return;
         }
 
-        find_left_down();
-        if (L_left_down_found
+        const bool left_entry_cond =
+            is_L_left_found && !is_L_right_found
             && t_pointsEdgeLeft_size < L_SMALL
             && t_pointsEdgeRight_size > R_LARGE
-            && is_right_straight && !is_left_straight)
-        {
-            flag_ring = Left_Ring_Find;
-            right_regain_count = 0;
-            right_edge_phase   = EDGE_OK;
-            state_locking      = false;
-        }
+            && is_right_straight && !is_left_straight
+            && t_L_pointLeft.y < 100 && t_L_pointLeft.y > 30
+            && ring_outer_edge_stable(t_pointsEdgeRight, t_pointsEdgeRight_size);
+
+        const bool right_entry_cond =
+            is_L_right_found && !is_L_left_found
+            && t_pointsEdgeRight_size < L_SMALL
+            && t_pointsEdgeLeft_size > R_LARGE
+            && is_left_straight && !is_right_straight
+            && t_L_pointRight.y < 100 && t_L_pointRight.y > 30
+            && ring_outer_edge_stable(t_pointsEdgeLeft, t_pointsEdgeLeft_size);
+
+        if (left_entry_cond)
+            left_entry_confirm_count++;
         else
+            left_entry_confirm_count = 0;
+
+        if (right_entry_cond)
+            right_entry_confirm_count++;
+        else
+            right_entry_confirm_count = 0;
+
+        if (left_entry_confirm_count >= RING_ENTRY_CONFIRM_FRAMES)
         {
-            find_right_down();
-            if (L_right_down_found
-                && t_pointsEdgeRight_size < L_SMALL
-                && t_pointsEdgeLeft_size > R_LARGE
-                && is_left_straight && !is_right_straight)
-            {
-                flag_ring = Right_Ring_Find;
-                left_regain_count = 0;
-                left_edge_phase   = EDGE_OK;
-                state_locking     = false;
-            }
+            flag_ring                  = Left_Ring_Begin;
+            state_locking              = true;
+            left_regain_count          = 0;
+            left_edge_phase            = EDGE_OK;
+            right_regain_count         = 0;
+            right_edge_phase           = EDGE_OK;
+            left_entry_confirm_count   = 0;
+            right_entry_confirm_count  = 0;
+        }
+        else if (right_entry_confirm_count >= RING_ENTRY_CONFIRM_FRAMES)
+        {
+            flag_ring                  = Right_Ring_Begin;
+            state_locking              = true;
+            right_regain_count         = 0;
+            right_edge_phase           = EDGE_OK;
+            left_regain_count          = 0;
+            left_edge_phase            = EDGE_OK;
+            left_entry_confirm_count   = 0;
+            right_entry_confirm_count  = 0;
         }
         return;
     }
 
     /* ===== 左圆环 ===== */
-    if (flag_ring == Left_Ring_Find)
+    if (flag_ring == Left_Ring_Begin)
     {
-        cv::Point mid = find_left_mid(115);
-        if (L_left_mid_found && mid.y > Y_FIND_TO_BEGIN && !state_locking)
+        update_edge_regain(t_pointsEdgeLeft_size, left_regain_count, left_edge_phase);
+
+        if (left_regain_count >= 1)
         {
-            flag_ring       = Left_Ring_Begin;
-            state_locking   = true;
+            flag_ring          = Left_Ring_In;
+            state_locking      = true;
             right_regain_count = 0;
             right_edge_phase   = EDGE_OK;
-        }
-    }
-    else if (flag_ring == Left_Ring_Begin)
-    {
-        if (is_L_left_found)
-            state_locking = false;
-
-        update_edge_regain(t_pointsEdgeRight_size, right_regain_count, right_edge_phase);
-
-        if (right_regain_count >= 1 && !state_locking)
-        {
-            flag_ring        = Left_Ring_In;
-            state_locking    = true;
         }
     }
     else if (flag_ring == Left_Ring_In)
@@ -184,28 +176,16 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
     }
 
     /* ===== 右圆环（镜像） ===== */
-    if (flag_ring == Right_Ring_Find)
+    if (flag_ring == Right_Ring_Begin)
     {
-        cv::Point mid = find_right_mid(115);
-        if (L_right_mid_found && mid.y > Y_FIND_TO_BEGIN && !state_locking)
-        {
-            flag_ring      = Right_Ring_Begin;
-            state_locking  = true;
-            left_regain_count = 0;
-            left_edge_phase   = EDGE_OK;
-        }
-    }
-    else if (flag_ring == Right_Ring_Begin)
-    {
-        if (is_L_right_found)
-            state_locking = false;
+        update_edge_regain(t_pointsEdgeRight_size, right_regain_count, right_edge_phase);
 
-        update_edge_regain(t_pointsEdgeLeft_size, left_regain_count, left_edge_phase);
-
-        if (left_regain_count >= 1 && !state_locking)
+        if (right_regain_count >= 1)
         {
-            flag_ring     = Right_Ring_In;
-            state_locking = true;
+            flag_ring          = Right_Ring_In;
+            state_locking      = true;
+            left_regain_count  = 0;
+            left_edge_phase    = EDGE_OK;
         }
     }
     else if (flag_ring == Right_Ring_In)
@@ -246,25 +226,25 @@ void Ring::Ring_Run(std::vector<POINT> &t_pointsEdgeLeft,
     if (flag_ring == Ring_None)
         return;
 
-    /* 左环：Find/Out 巡右；Begin/In 巡左 */
-    if (flag_ring == Left_Ring_Find || flag_ring == Left_Ring_Out)
+    /* 左环：Begin/Out 巡右（清左）；In 巡左（清右） */
+    if (flag_ring == Left_Ring_Begin || flag_ring == Left_Ring_Out)
     {
         t_pointsEdgeLeft.clear();
         t_pointsEdgeLeft_size = 0;
     }
-    else if (flag_ring == Left_Ring_Begin || flag_ring == Left_Ring_In)
+    else if (flag_ring == Left_Ring_In)
     {
         t_pointsEdgeRight.clear();
         t_pointsEdgeRight_size = 0;
     }
 
-    /* 右环：Find/Out 巡左；Begin/In 巡右 */
-    if (flag_ring == Right_Ring_Find || flag_ring == Right_Ring_Out)
+    /* 右环：Begin/Out 巡左（清右）；In 巡右（清左） */
+    if (flag_ring == Right_Ring_Begin || flag_ring == Right_Ring_Out)
     {
         t_pointsEdgeRight.clear();
         t_pointsEdgeRight_size = 0;
     }
-    else if (flag_ring == Right_Ring_Begin || flag_ring == Right_Ring_In)
+    else if (flag_ring == Right_Ring_In)
     {
         t_pointsEdgeLeft.clear();
         t_pointsEdgeLeft_size = 0;
@@ -272,8 +252,19 @@ void Ring::Ring_Run(std::vector<POINT> &t_pointsEdgeLeft,
 }
 
 
+#if 0 /* 旧版行扫描 ring_find_line / find_*，仅保留对照 */
+
 void Ring::ring_find_line(cv::Mat &img, int /*y_start*/)
 {
+    int rowstart = (ROI_H - 5);
+    int rowup    = 5;
+    int thresOTSU = 128;
+    std::vector<POINT> pointsLeft;
+    std::vector<POINT> pointsRight;
+    std::vector<POINT> pointsMid;
+    int pointsLeft_size  = 0;
+    int pointsRight_size = 0;
+    int pointsMid_size   = 0;
     int step = 0;
     for (int row = rowstart; row > rowup; row--)
     {
@@ -328,6 +319,8 @@ void Ring::ring_find_line(cv::Mat &img, int /*y_start*/)
 
 cv::Point Ring::find_left_down()
 {
+    bool L_left_down_found = false;
+    int L_id_left_down = 666;
     if (pointsLeft_size < 4) return cv::Point(0, 0);
     if (pointsLeft[0].x != 0 && pointsLeft[1].x != 0 && pointsLeft[3].x != 0)
     {
@@ -344,6 +337,8 @@ cv::Point Ring::find_left_down()
             }
         }
     }
+    (void)L_left_down_found;
+    (void)L_id_left_down;
     return cv::Point(0, 0);
 }
 
@@ -462,6 +457,8 @@ cv::Point Ring::find_right_up()
     }
     return cv::Point(0, 0);
 }
+
+#endif /* 旧版行扫描 */
 
 
 void Ring::findline_lefthand_adaptive(cv::Mat &img, int /*block_size*/, int /*clip_value*/,
@@ -644,8 +641,6 @@ void Ring::entering_track_far_line(cv::Mat imgBinary)
         int a, b;
         if (general.transf(a, b, far_entering_edge[i].x, far_entering_edge[i].y))
             t_far_entering_edge.emplace_back(a, b);
-        else
-            break;
     }
     t_far_entering_edge_size = (int)t_far_entering_edge.size();
 
@@ -691,8 +686,6 @@ void Ring::exiting_track_far_line(cv::Mat imgBinary)
         int a, b;
         if (general.transf(a, b, far_exiting_edge[i].x, far_exiting_edge[i].y))
             t_far_exiting_edge.emplace_back(a, b);
-        else
-            break;
     }
     t_far_exiting_edge_size = (int)t_far_exiting_edge.size();
 

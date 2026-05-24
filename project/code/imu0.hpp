@@ -4,10 +4,10 @@
 #include "zf_common_headfile.hpp"  
   
 /* ============ 配置 ============ */  
-#define IMU_ZERO_COUNT          500    // 零漂采样次数（200×6ms = 1.2秒）  
-#define IMU_DT_MS               6      // 读取周期  
-#define IMU_GYRO_LSB_PER_DPS    1.0f  // IMU660RA ±2000 dps 量程下的灵敏度 (LSB/(deg/s))  
-#define IMU_GYRO_ALPHA          0.5f   // Z轴陀螺仪一阶低通滤波系数 (0~1，越小越平滑)  
+#define IMU_ZERO_COUNT          500    // 零漂采样次数（500×6ms ≈ 3秒）  
+#define IMU_DT_MS               6      // 角速度环 6ms 采样周期  
+#define IMU_GYRO_LSB_PER_DPS    16.4f  // IMU660RA ±2000 dps 量程下的灵敏度 (LSB/(deg/s))  
+#define IMU_GYRO_ALPHA          0.5f   // X轴陀螺仪一阶低通滤波系数 (0~1，越小越平滑)  
 #define IMU_GYRO_GAIN_POS       2.36f // 逆时针(raw_minus_zero>=0)方向 dps 增益，实测360°时单独调  
 #define IMU_GYRO_GAIN_NEG       2.64f  // 顺时针(raw_minus_zero<0) 方向 dps 增益，实测360°时单独调  
   
@@ -21,7 +21,7 @@ extern volatile uint32_t g_imu_call_hz;
   
 /* ============ 接口 ============ */  
 void  imu_init(void);  
-void  imu_read(void);         // 6ms 定时器回调  
+void  imu_read(void);         // 6ms 角速度环回调中调用  
 void  imu_reset_angle(void);  
 float imu_get_yaw_speed(void);  
 float imu_get_angle(void);  

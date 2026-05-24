@@ -1,5 +1,6 @@
 #include "motor.hpp"  
 #include "pid.hpp"  
+#include "imu0.hpp"  
 #include "zf_common_headfile.hpp"  
 #include <fstream>
 #include <string>
@@ -33,8 +34,7 @@ volatile int16 g_enc_r   = 0;
 //编码器累计度数  
 volatile int16 total_enc_l = 0;  
 volatile int16 total_enc_r = 0;  
-  
-  
+volatile float g_target_yaw_spd = 0.0f;  
 
   
 /* ====================== PID结构体定义 ====================== */  
@@ -48,18 +48,15 @@ volatile int16 total_enc_r = 0;
 // PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
 // PD_Double  pd_yaw               = PD_DOUBLE_INIT(0.03f, 0.0f, 0.0f, 0.018f);  
   
-PID_Inc_Datatypedef pid_speed_l = PID_INC_INIT(5.00f, 15.00f, 0.0f);  
-PID_Inc_Datatypedef pid_speed_r = PID_INC_INIT(5.00f, 15.00f, 0.0f); 
-PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
-PD_Double  pd_yaw               = PD_DOUBLE_INIT(0.017f, 0.00f, 0.00f, 0.00f); //双pd角度环 0.017 0.0012 0.010 0.008
-PID_Pos_Datatypedef pid_yaw_spd = PID_POS_INIT(0.0, 0.0, 0.0, 0.0);
+/* VOFA 在线调参后请同步写回此处 P/I/D，见 project/code/VOFA使用说明.md */
+PID_Inc_Datatypedef pid_speed_l = PID_INC_INIT(1000.00f, 10.00f, 0.0f);  //5.00 15.00 0.0
+PID_Inc_Datatypedef pid_speed_r = PID_INC_INIT(1000.00f, 10.00f, 0.0f); 
+// PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
+PID_Pos_Datatypedef pid_yaw_spd = PID_POS_INIT(0.015f, 0.0f, 0.0f, 0.0f);   //角速度环位置式PD，P=0.015 I=0 D=0.006
+PD_Double  pd_yaw               = PD_DOUBLE_INIT(5.0f, 1.0f, 0.5f, 0.00f); //双pd角度环 0.017 0.0003 0.00 0.002
 /* ====================== 增量式速度环内部累计占空比 ====================== */  
 static float duty_l_out = 0.0f;  
 static float duty_r_out = 0.0f;  
-  
-  
-  
-  
 /* ====================== motor_init ====================== */  
 void motor_init()  
 {  
@@ -170,8 +167,8 @@ int get_dist ()
     // g_speed_l = motor_l.enc;  
     // g_speed_r = motor_r.enc;  
     g_speed   = 0.5f * (g_speed_l + g_speed_r);  
-    duty_l_out += PID_Inc(&pid_speed_l, g_target_speed + g_u_yaw - g_speed_l);  
-    duty_r_out += PID_Inc(&pid_speed_r, g_target_speed - g_u_yaw - g_speed_r);  
+    duty_l_out += PID_Inc(&pid_speed_l, g_target_speed - g_u_yaw - g_speed_l);  
+    duty_r_out += PID_Inc(&pid_speed_r, g_target_speed + g_u_yaw - g_speed_r);  
     duty_l_out = limit_float(duty_l_out, -MAX_PWM, MAX_PWM);  
     duty_r_out = limit_float(duty_r_out, -MAX_PWM, MAX_PWM);  
 
@@ -186,48 +183,89 @@ void update_direction()
     g_u_yaw = PID_Pos(&pid_dir, img_err);  
     g_u_yaw = limit_float(g_u_yaw, -12.0f, 12.0f);  
 }  
-/*====================== 角度环（位置式，双pd）============================*/
-void yaw_loop()    
-{     
-    imu_read();  
-    if (!g_imu_ready) return;                           // 校准未完成不输出  
-    g_u_yaw = PD_Loc_Ctrl_2PD(&pd_yaw, img_err, g_yaw_speed);  // ← 传陀螺仪数据  
-    g_u_yaw = limit_float(g_u_yaw, -5.0f, 5.0f);    
-}    
+/**
+ * @brief 角度外环（18ms）：图像偏差经双 PD 得到角速度给定
+ * @return 无
+ * @note   不调用 imu_read，使用 6ms 角速度环已更新的 g_yaw_speed；公式与 pd_yaw 不变
+ */
+void yaw_loop()
+{
+    if (!g_imu_ready)
+        return;
+    g_target_yaw_spd = PD_Loc_Ctrl_2PD(&pd_yaw, img_err, g_yaw_speed);
+    g_target_yaw_spd = limit_float(g_target_yaw_spd, -180.0f, 180.0f);
+}
 
-/*==========================角速度环（增量式，单pd）=====================================*/
+/**
+ * @brief 角速度中环（6ms）：位置式 PD，跟踪外环给定
+ * @return 无
+ * @note   输出 g_u_yaw 作为左右轮差速，单位与速度环目标叠加一致（m/s）
+ */
 void yaw_spd_loop()
 {
     imu_read();
-    if (!g_imu_ready) return; 
+    if (!g_imu_ready)
+    {
+        g_u_yaw = 0.0f;
+        return;
+    }
+    // g_target_yaw_spd = 10.0f;
+    const float err_w = g_target_yaw_spd - g_yaw_speed;
+    g_u_yaw = PID_Pos(&pid_yaw_spd, err_w);
+    g_u_yaw = limit_float(g_u_yaw, -5.0f, 5.0f);
 }
-  
+
 /* ====================== 速度环重置（目标速度变更时调用） ====================== */  
 void speed_reset()  
 {  
     PID_Inc_Reset(&pid_speed_l);  
     PID_Inc_Reset(&pid_speed_r);  
+    PID_Pos_Reset(&pid_yaw_spd);
     duty_l_out = 0.0f;  
     duty_r_out = 0.0f;  
 }  
-  
-/* ====================== pit_callback_speed（注册给pit_timer） ====================== */  
-void pit_callback_speed()  
-{  
+
+/**
+ * @brief 2ms PIT 回调：仅内环速度控制
+ * @return 无
+ */
+void pit_callback_speed(void)
+{
     speed_cascaded_5ms();
-}  
+}
+
+/**
+ * @brief 6ms PIT 回调：陀螺仪采样 + 角速度环
+ * @return 无
+ */
+void pit_callback_yaw_spd(void)
+{
+    yaw_spd_loop();
+}
+
+/**
+ * @brief 18ms PIT 回调：角度外环
+ * @return 无
+ */
+void pit_callback_yaw(void)
+{
+    yaw_loop();
+}
   
 /* ====================== run_speed_loop（主循环手动调用，调试用） ====================== */  
 void run_speed_loop()  
 {  
     speed_cascaded_5ms();  
 }  
-/*----------------------角度环-------------------------*/  
- void yaw_callback_speed()  
- {  
-    yaw_loop();  
-    
- }  
+
+/**
+ * @brief 角度环回调（兼容旧接口，等同 pit_callback_yaw）
+ * @return 无
+ */
+void yaw_callback_speed(void)
+{
+    pit_callback_yaw();
+}  
 // ============================ 渐进式死区补偿 ============================  
 /**  
  * @brief 渐进式死区补偿，消除低速前馈跳变导致的高频抖动  

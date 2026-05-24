@@ -64,7 +64,7 @@ float PD_Loc_Ctrl_2PD(PD_Double *pd, float err, float gyro_z)
     float d1_out = pd->D1 * (err - pd->err_last);  
   
     // 陀螺仪阻尼（通常取负反馈方向，符号按你的实际方向再确认）  
-    float d2_out = pd->D2 * gyro_z;  
+    float d2_out = - pd->D2 * gyro_z;  
   
     // 更新历史误差  
     pd->err_last = err;  

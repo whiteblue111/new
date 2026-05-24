@@ -50,12 +50,12 @@ void imu_read(void)//2000
 {
     g_imu_call_cnt++;
     /* 1. 读取原始值 */
-    int16 raw_z = imu_dev.get_gyro_z();
+    int16 raw_x = imu_dev.get_gyro_x();
 
     /* 2. 零漂校准状态机（与参考代码一致） */
     if (s_zero_count < IMU_ZERO_COUNT)
     {
-        s_zero_sum += (float)raw_z;
+        s_zero_sum += (float)raw_x;
         s_zero_count++;
         g_yaw_speed = 0.0f;
         return; // 校准期间不积分
@@ -71,26 +71,17 @@ void imu_read(void)//2000
         return;
     }
     float dt = IMU_DT_MS * 0.001f;
-    float raw_minus_zero = (float)raw_z - s_zero_point;
-    float gain = (raw_minus_zero >= 0.0f) ? IMU_GYRO_GAIN_POS : IMU_GYRO_GAIN_NEG;
-    float cur_yaw_dps = raw_minus_zero / IMU_GYRO_LSB_PER_DPS * gain;
+    float raw_minus_zero = (float)raw_x - s_zero_point;
+    // float gain = (raw_minus_zero >= 0.0f) ? IMU_GYRO_GAIN_POS : IMU_GYRO_GAIN_NEG;
+    float cur_yaw_dps = raw_minus_zero / IMU_GYRO_LSB_PER_DPS ;
 
-    /* 一阶低通滤波 (参考 IMUHandler::update 的 LPF 思路，只对 Z 轴) */
+    /* 一阶低通滤波 (参考 IMUHandler::update 的 LPF 思路，只对 X 轴) */
     float filt_yaw_dps = IMU_GYRO_ALPHA * cur_yaw_dps
                        + (1.0f - IMU_GYRO_ALPHA) * s_last_yaw_speed;
     s_last_yaw_speed = filt_yaw_dps;
 
     g_yaw_speed  = filt_yaw_dps;          // 单位：deg/s（滤波后）
     g_angle_yaw += filt_yaw_dps * dt;     // 单位：deg
-
-    /* 1 Hz 打印（IMU_DT_MS=6ms → 每 (1000/IMU_DT_MS) 次约 1 秒） */
-    static uint32_t print_cnt = 0;
-    if (++print_cnt >= (1000U / IMU_DT_MS))
-    {
-        print_cnt = 0;
-        printf("[imu] 原始: %6d, 角速度: %7.2f dps, 角度: %7.2f deg\n",
-               raw_z, g_yaw_speed, g_angle_yaw);
-    }
 }
 
 /* ============ 工具函数 ============ */
@@ -110,7 +101,7 @@ float imu_get_angle(void)
 }
 
 /**
- * @brief 测试 imu_read() 实际调用频率（用于验证陀螺仪采样率是否达到 6ms PIT 期望的 ~166Hz）
+ * @brief 测试 imu_read() 实际调用频率（用于验证陀螺仪采样率是否达到 6ms PIT 期望的 ~167Hz）
  * @return 无；统计结果写入全局 g_imu_call_hz，并每秒 printf 一次
  * @sample 在 main() 的 while(1) 主循环中每次迭代调用 imu_test_call_hz();
  * @note 非阻塞实现，使用 gettimeofday 计时；首次调用仅初始化基准时间戳，

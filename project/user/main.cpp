@@ -11,6 +11,7 @@
  *           坐标 uint16，超过当前帧实际点数的位置零填充
  */
 
+#include "app_config.h"
 #include "zf_common_headfile.hpp"
 #include "imgproc.hpp"
 #include "image.hpp"
@@ -20,57 +21,43 @@
 #include "motor.hpp"
 #include "vision.hpp"
 #include "redbrick.hpp"
+#if defined(ENABLE_VOFA) && (ENABLE_VOFA == 1)
+#include "vofa_app.hpp"
+#endif
 
 #include <opencv2/opencv.hpp>
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+#include <signal.h>
+#endif
 #include <cstdio>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <unistd.h>
-#if defined(__GLIBC__)
-#include <execinfo.h>
-#endif
 
 using namespace cv;
 
 #define TRACK_DEBUG_LEVEL 2
 
-/** 1=恢复 5ms 速度环 + 6ms 角度环；验证阶段建议低速 g_target_speed */
+/** 1=三串环：速度 2ms + 角速度 6ms + 角度 18ms；验证阶段建议低速 g_target_speed */
 #define ENABLE_MOTOR_CLOSED_LOOP 1
 
 /** 1=主循环调用 NCNN 碑识别 + 红砖避障状态机 */
 #define ENABLE_VISION_BRICK      1
 
 /** 1=终端打印图像偏差 img_err（像素）；0=关闭 */
-#define IMG_ERR_PRINT_ENABLE     1
+#define IMG_ERR_PRINT_ENABLE     0
 /** 每 N 帧打印一次，避免 60fps 刷屏 */
 #define IMG_ERR_PRINT_INTERVAL   15
 
-/** 1=主循环分阶段打印 [stage] N（定位 Segmentation fault）；0=关闭 */
-#define MAIN_STAGE_TRACE         1
-/** 1=注册 SIGSEGV 并打印 g_main_stage + 栈回溯；0=关闭 */
-#define CRASH_SIG_HANDLER        1
+/*
+ * 段错误二分（app_config.h 中 APP_TERMINAL_DEBUG=1 时配合 [dbg] stage= 探针）：
+ *   ENABLE_VISION_BRICK 0  -> 排除 NCNN / 红砖
+ *   ENABLE_MOTOR_CLOSED_LOOP 0 -> 排除 PIT 速度/角度环
+ *   TRACK_DEBUG_LEVEL 0 (CMake) -> 排除串口 HUD / display_show_*
+ *   tcp_ok=false 或注释 seekfree_assistant_camera_send -> 排除 TCP 发包
+ */
 
-/** 二分隔离：逐项置 1 可关闭对应模块，定位崩溃源 */
-#define CRASH_ISOLATE_NO_SPEED_PIT  0
-#define CRASH_ISOLATE_NO_YAW_PIT    0
-#define CRASH_ISOLATE_NO_TCP_SEND   0
-#define CRASH_ISOLATE_NO_TRACK_DBG  0
-
-/* 崩溃时最后执行到的主循环阶段（见 STAGE 宏） */
-volatile int g_main_stage = 0;
-static volatile uint32_t g_main_frame = 0;
-
-#if MAIN_STAGE_TRACE
-#define STAGE(n) do { \
-    g_main_stage = (n); \
-    fprintf(stderr, "[stage] frame=%u step=%d\n", g_main_frame, (n)); \
-    fflush(stderr); \
-} while (0)
-#else
-#define STAGE(n) do { g_main_stage = (n); } while (0)
-#endif
 
 /* ====================== 模型 / 设备对象 ====================== */
 ncnn::Net my_net;
@@ -82,9 +69,10 @@ zf_device_ips200     ips200;
 volatile uint32_t g_speed_loop_cnt = 0;
 volatile uint32_t g_last_speed_hz  = 0;
 float yaw_diff = 0.0f;
-zf_driver_pit pit_timer;
+zf_driver_pit pit_timer;       /* 2ms 速度环 */
+zf_driver_pit pit_yaw_spd;     /* 6ms 角速度环 */
 zf_driver_pit fps_timer;
-zf_driver_pit img_timer;
+zf_driver_pit img_timer;       /* 18ms 角度环 */
 
 RedBlockAvoider g_brick_avoider;
 
@@ -115,10 +103,23 @@ uint16 dot_x_right [POINTS_MAX_LEN] = {0};
 uint16 dot_y_right [POINTS_MAX_LEN] = {0};
 
 /* ====================== 偏差量 ====================== */
-float img_err = 0.0f;
+volatile float img_err = 0.0f;
+
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+/**
+ * @brief 主循环阶段探针（崩溃前最后一条 [dbg] stage= 即安全边界）
+ * @param id 阶段编号：10=get 20=vision 30=image 40=err 50=debug 60=display 70=send 80=loop_end
+ */
+static inline void dbg_stage_mark(int id)
+{
+    g_dbg_stage_id = (sig_atomic_t)id;
+    printf("[dbg] stage=%d\n", id);
+    fflush(stdout);
+}
+#endif
 
 /* ====================== 控制量（motor.cpp 在用） ====================== */
-volatile float g_target_speed = 1.0f;
+volatile float g_target_speed = 0.0f;
 volatile float g_u_yaw        = 0.0f;
 
 
@@ -144,6 +145,9 @@ extern vuint8 seekfree_assistant_parameter_update_flag[SEEKFREE_ASSISTANT_SET_PA
 static inline void flatten_points(const std::vector<POINT> &pts, int size,
                                   uint16 *x_buf, uint16 *y_buf)
 {
+    const int vec_n = (int)pts.size();
+    if (size > vec_n)
+        size = vec_n;
     int n = (size < POINTS_MAX_LEN) ? size : POINTS_MAX_LEN;
     
     if (n == 0) {
@@ -182,7 +186,11 @@ void sigint_handler(int)
 void cleanup()
 {
     printf("程序退出，执行清理操作\n");
+#if defined(ENABLE_VOFA) && (ENABLE_VOFA == 1)
+    vofa_app_shutdown();
+#endif
     pit_timer.stop();
+    pit_yaw_spd.stop();
     fps_timer.stop();
     img_timer.stop();
     motor_stop();
@@ -200,7 +208,7 @@ int main()
     // ips200.init(FB_PATH);
     // display_init(&ips200);
     my_key_init();
-    vision_init();
+    // vision_init();
 
     /* ---------- 退出注册 ---------- */
     atexit(cleanup);
@@ -230,12 +238,25 @@ int main()
     }
 
 #if ENABLE_MOTOR_CLOSED_LOOP
-    g_target_speed = 0.0f;
+    g_target_speed = 1.0f;
     pit_timer.init_ms(2, pit_callback_speed);
-    img_timer.init_ms(6, yaw_callback_speed);
-    printf("[main] 闭环已开: 速度环 2ms + 角度环 6ms, target=%.2f\n", g_target_speed);
+    pit_yaw_spd.init_ms(6, pit_callback_yaw_spd);
+#if YAW_SPD_TUNE_MODE
+    printf("[main] 闭环已开: 速度 2ms + 角速度 6ms（角速度环调参，无角度环）, target=%.2f\n",
+           g_target_speed);
+#else
+    img_timer.init_ms(18, pit_callback_yaw);
+    printf("[main] 闭环已开: 速度 2ms + 角速度 6ms + 角度 18ms, target=%.2f\n",
+           g_target_speed);
+#endif
 #else
     printf("[main] 开环图像验证模式（未启动电机定时器）\n");
+#endif
+
+#if defined(ENABLE_VOFA) && (ENABLE_VOFA == 1)
+    bool vofa_ok = vofa_app_init();
+    if (!vofa_ok)
+        printf("[main] VOFA 未就绪，可检查串口或 cmake -DVOFA_SERIAL_DEVICE=...\n");
 #endif
 
     printf("[main] 初始化完成，开始主循环\n");
@@ -243,30 +264,37 @@ int main()
     /* ====================== 主循环 ====================== */
     while (1)
     {
-        if (!image_get(camera, rgb_img, gray_img, gray_cut_img)) continue;
+#if defined(ENABLE_VOFA) && (ENABLE_VOFA == 1)
+        vofa_app_poll();
+#endif
+        if (!image_get(camera, rgb_img, gray_img, rgb_cut_img, gray_cut_img)) continue;
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        dbg_stage_mark(10);
+#endif
 
 #if ENABLE_VISION_BRICK
         // process_car_vision(rgb_img);
-        // g_brick_avoider.process(rgb_img, false);
+        g_brick_avoider.process(rgb_cut_img, false);
+#endif
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        dbg_stage_mark(20);
 #endif
 
         /* -------- 巡线主流水线 -------- */
         image_process();
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        dbg_stage_mark(30);
+#endif
         img_err = Image_Error_Get();
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        dbg_stage_mark(40);
+#endif
         my_key_poll();
 
-#if ENABLE_VISION_BRICK
-        // if (g_brick_avoider.get_state() == RB_STATE_AVOIDING
-        //  || g_brick_avoider.get_state() == RB_STATE_RETURNING)
-        // {
-        //     img_err += g_brick_avoider.get_avoid_offset() * 0.08f;
-        // }
-#endif
-
 #if IMG_ERR_PRINT_ENABLE
-        // static int s_img_err_print_cnt = 0;
-        // if (++s_img_err_print_cnt % IMG_ERR_PRINT_INTERVAL == 0)
-        //     printf("[img_err] %.2f px\n", img_err);
+        static int s_img_err_print_cnt = 0;
+        if (++s_img_err_print_cnt % IMG_ERR_PRINT_INTERVAL == 0)
+            printf("[img_err] %.2f px\n", img_err);
 #endif
 
         static int disp_cnt = 0;
@@ -276,11 +304,20 @@ int main()
 #if TRACK_DEBUG_LEVEL >= 1
             display_show_debug_hud_phase_c();
             display_show_debug_hud_phase_d();
+#if ENABLE_VISION_BRICK
+            display_show_debug_hud_redbrick(g_brick_avoider);
+#endif
+#endif
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+            dbg_stage_mark(60);
 #endif
         }
 #if TRACK_DEBUG_LEVEL >= 2
         track_debug_print_phase_c_throttled();
         track_debug_print_phase_d_throttled();
+#endif
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        dbg_stage_mark(50);
 #endif
 
         /* -------- 每 5 帧发一次给逐飞助手 -------- */
@@ -308,11 +345,22 @@ int main()
             flatten_points(CenterEdge,      CenterEdge_size,      dot_x_mid,   dot_y_mid);
             flatten_points(pointsEdgeRight, pointsEdgeRight_size, dot_x_right, dot_y_right);
         }
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        if (send_now)
+            dbg_stage_mark(70);
+#endif
 
-        imu_test_call_hz();
+#if defined(ENABLE_VOFA) && (ENABLE_VOFA == 1)
+        static int vofa_send_cnt = 0;
+        if (++vofa_send_cnt % 2 == 0)
+            vofa_app_send_waveform();
+#endif
 
         if (send_now)
             seekfree_assistant_camera_send();
+#if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
+        dbg_stage_mark(80);
+#endif
     }
 
     return 0;

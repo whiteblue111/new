@@ -57,5 +57,8 @@ private:
 void vision_init(void);
 void process_car_vision(cv::Mat& frame);
 
+/** 主循环阶段探针 ID（ENABLE_TERMINAL_DEBUG 时由 main 写入） */
+extern volatile sig_atomic_t g_dbg_stage_id;
+
 
 #endif // VISION_MODULE_HPP

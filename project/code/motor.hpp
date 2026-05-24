@@ -34,13 +34,16 @@ extern volatile int16 g_enc_r;
   
 /* ====================== 控制参数 ====================== */  
 extern volatile float g_target_speed;   
-extern volatile float g_u_yaw;  
-extern float img_err;
+extern volatile float g_target_yaw_spd;  // 外环输出，中环角速度给定  
+extern volatile float g_u_yaw;           // 中环输出，内环左右差速  
+extern volatile float img_err;
   
 /* ====================== PID结构体 ====================== */  
 extern PID_Inc_Datatypedef pid_speed_l;  // 速度环：增量式  
 extern PID_Inc_Datatypedef pid_speed_r;  // 速度环：增量式  
-extern PID_Pos_Datatypedef pid_dir;      // 角度环：位置式  
+extern PID_Pos_Datatypedef pid_dir;      // 角度环：位置式（备用）  
+extern PID_Pos_Datatypedef pid_yaw_spd;  // 角速度环：位置式 PD（I=0）  
+extern PD_Double           pd_yaw;       // 角度外环：双 PD  
   
 /* ====================== 接口函数 ====================== */  
 void motor_init();  
@@ -48,12 +51,14 @@ void motor_stop();
 void motor_set_lr(int duty_l, int duty_r);  
 void update_direction();                // 角度环（位置式）  
 void speed_reset();                     // 目标速度变更时重置速度环状态  
-void pit_callback_speed();              // 注册给 pit_timer（速度环增量式）  
+void pit_callback_speed(void);          // 2ms 速度环  
+void pit_callback_yaw_spd(void);        // 6ms 角速度环  
+void pit_callback_yaw(void);            // 18ms 角度环  
 void run_speed_loop();                  // 主循环手动调用（调试用）  
 void speed_parallel_5ms();
 void get_enconder();
 int get_dist ();
-void yaw_callback_speed();
+void yaw_callback_speed(void);          // 兼容：等同 pit_callback_yaw  
 typedef struct motor_param_t {
     float enc;//原始数据
     float encb;//滤波

@@ -55,6 +55,7 @@ enum class Scene
 
 /* ====================== 全局图像 ====================== */
 extern cv::Mat rgb_img;     /* 摄像头 BGR 原图（NCNN 输入） */
+extern cv::Mat rgb_cut_img; /* 彩色图裁剪（ROI，红砖避障输入） */
 extern cv::Mat gray_img;    /* 灰度图（与 rgb_img 同尺寸） */
 extern cv::Mat gray_cut_img; /* 灰度图裁剪（巡线主流水线输入） */
 extern cv::Mat bin_img;     /* OTSU + 闭运算后的二值图 */
@@ -105,14 +106,17 @@ extern int   scene;     /* NormalScene / CrossScene / RingScene */
  * @param camera     摄像头对象引用
  * @param raw_img    [out] BGR 320x240 原图（NCNN 输入）
  * @param gray_img   [out] 灰度 320x240（巡线主流水线输入）
+ * @param cut_raw_img [out] BGR ROI 320x130（与灰度同 ROI，用于彩色模块）
+ * @param cut_gray_img [out] 灰度 ROI 320x130（巡线主流水线输入）
  * @return           取帧成功为 true
  * @note             内部对 raw_img / gray_img 做 flip(-1)（沿用本工程相机安装方向）
  */
-bool image_get(lq_camera_ex &camera, cv::Mat &raw_img, cv::Mat &gray_img, cv::Mat &cut_gray_img);
+bool image_get(lq_camera_ex &camera, cv::Mat &raw_img, cv::Mat &gray_img,
+               cv::Mat &cut_raw_img, cv::Mat &cut_gray_img);
 
 /**
  * @brief 巡线主流水线
- * @sample image_get(camera, rgb_img, gray_img, cut_gray_img); image_process();
+ * @sample image_get(camera, rgb_img, gray_img, rgb_cut_img, gray_cut_img); image_process();
  * @note   读 rgb_img / gray_img 全局；偏差在 Image_Error_Get() 中计算
  *         不依赖任何 1D 边线数组，所有结果在 vector<POINT> 全局中
  */
@@ -128,9 +132,9 @@ void track_elements_reset(void);
 
 /**
  * @brief 中线横向像素偏差，写入 img_err 并返回 aim_angle
- * @return 横向偏差（像素），COLSIMAGE/2 - mean(t_CenterEdge[15..20].x)
+ * @return 横向偏差（像素），mean(t_CenterEdge[15..20].x) - COLSIMAGE/2
  * @sample image_process(); float err = Image_Error_Get();
- * @note   三轮车后轮差速；中线偏右时返回值为负；实车需按像素量级重调 pd_yaw
+ * @note   三轮车后轮差速；中线偏右时返回值为正；实车需按像素量级重调 pd_yaw
  */
 float Image_Error_Get(void);
 

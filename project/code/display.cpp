@@ -2,6 +2,7 @@
 #include "image.hpp"
 #include "cross.hpp"
 #include "ring.hpp"
+#include "redbrick.hpp"
 #include "zf_common_headfile.hpp"
 #include <cmath>
 #include <cstdint>
@@ -55,11 +56,9 @@ static const char *ring_status_to_text(int flag, char *out)
     switch (flag)
     {
     case Ring::Ring_None:           text = "None";  break;
-    case Ring::Left_Ring_Find:      text = "L-FND"; break;
     case Ring::Left_Ring_Begin:     text = "L-BEG"; break;
     case Ring::Left_Ring_In:        text = "L-IN";  break;
     case Ring::Left_Ring_Out:       text = "L-OUT"; break;
-    case Ring::Right_Ring_Find:     text = "R-FND"; break;
     case Ring::Right_Ring_Begin:    text = "R-BEG"; break;
     case Ring::Right_Ring_In:       text = "R-IN";  break;
     case Ring::Right_Ring_Out:      text = "R-OUT"; break;
@@ -78,6 +77,9 @@ static const char *ring_status_to_text(int flag, char *out)
 static void draw_edge_on_track(const std::vector<POINT> &pts, int n, uint16 color)
 {
     if (!s_ips || n <= 0) return;
+    const int vec_n = (int)pts.size();
+    if (n > vec_n)
+        n = vec_n;
     for (int i = 0; i < n; i++)
     {
         int sx = pts[i].x * DISP_W / COLSIMAGE;
@@ -152,7 +154,7 @@ void display_show_overlay(int left_org_num, int right_org_num,
  * @brief 在 IPS200 上显示未透视二值 ROI 与最终中线
  * @return 无
  * @sample display_show_track();
- * @note   bin_img 320×130 横向缩放到 240 宽；绿/蓝为 ROI 边线，黄为 t_pointsEdge、红为 t_CenterEdge 俯视直绘
+ * @note   bin_img 320×130 横向缩放到 240 宽；绿/蓝为 ROI 边线，黄为 t_pointsEdge、红为 t_CenterEdge 俯视红点（不连线）
  */
 void display_show_track(void)
 {
@@ -196,11 +198,9 @@ void display_show_track(void)
             draw_cross_on_track(rx, ry, RGB565_PURPLE);
     }
 
-    /* 俯视中线（红，直绘 t_CenterEdge） */
-    if (t_CenterEdge_size >= 2)
+    /* 俯视中线（红，直绘 t_CenterEdge，仅画点不连线） */
+    if (t_CenterEdge_size >= 1)
     {
-        int prev_sx = -1;
-        int prev_sy = -1;
         for (int i = 0; i < t_CenterEdge_size; i++)
         {
             int sx = t_CenterEdge[i].x * DISP_W / COLSIMAGE;
@@ -208,13 +208,6 @@ void display_show_track(void)
             if (sx <= 0 || sx >= DISP_W - 1 || sy <= 0 || sy >= DISP_H - 1) continue;
 
             s_ips->draw_point((uint16)sx, (uint16)sy, RGB565_RED);
-            if (prev_sx >= 0)
-            {
-                s_ips->draw_line((uint16)prev_sx, (uint16)prev_sy,
-                                 (uint16)sx, (uint16)sy, RGB565_RED);
-            }
-            prev_sx = sx;
-            prev_sy = sy;
         }
     }
 }
@@ -303,4 +296,45 @@ void display_show_debug_hud_phase_d(void)
     s_ips->show_string(200, 295, "Cv:");
     s_ips->show_int(220, 295, snap.curve_l, 1);
     s_ips->show_int(230, 295, snap.curve_r, 1);
+}
+
+/**
+ * @brief 红砖避障 HUD：检测量、状态机与阈值（y=140/155/170）
+ * @return 无
+ * @sample display_show_debug_hud_redbrick(g_brick_avoider);
+ * @note  显示在 y=140~170，不覆盖巡线 ROI 与 phase C/D HUD
+ */
+void display_show_debug_hud_redbrick(const RedBlockAvoider &av)
+{
+    if (!s_ips) return;
+
+    RedbrickDebugSnapshot snap{};
+    redbrick_debug_fill(av, snap);
+
+    s_ips->show_string(0, 140, "St:");
+    s_ips->show_int(20, 140, snap.state, 1);
+    s_ips->show_string(35, 140, "Det:");
+    s_ips->show_int(60, 140, snap.detected, 1);
+    s_ips->show_string(75, 140, "Ar:");
+    s_ips->show_int(95, 140, snap.area, 5);
+    s_ips->show_string(145, 140, "Asp:");
+    s_ips->show_float(175, 140, snap.aspect, 3, 1);
+
+    s_ips->show_string(0, 155, "Of:");
+    s_ips->show_float(20, 155, snap.offset, 4, 1);
+    s_ips->show_string(70, 155, "Frc:");
+    s_ips->show_int(95, 155, snap.force, 1);
+    s_ips->show_string(110, 155, "botY:");
+    s_ips->show_int(145, 155, snap.bot_y, 3);
+    s_ips->show_string(175, 155, "cx:");
+    s_ips->show_int(195, 155, snap.cx, 3);
+
+    s_ips->show_string(0, 170, "trY:");
+    s_ips->show_int(30, 170, snap.trg_y, 3);
+    s_ips->show_string(65, 170, "minA:");
+    s_ips->show_int(95, 170, snap.min_area, 4);
+    s_ips->show_string(135, 170, "Asp:");
+    s_ips->show_float(160, 170, snap.asp_min, 3, 1);
+    s_ips->show_string(195, 170, "~");
+    s_ips->show_float(205, 170, snap.asp_max, 3, 1);
 }

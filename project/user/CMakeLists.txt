@@ -46,6 +46,7 @@ include_directories(
     ../../libraries/zf_device 
     ../../libraries/zf_driver
     ../../libraries/zf_components/seekfree_assistant
+    ../../libraries/zf_components/vofa_plus/src
     
     # TFLM核心头文件（完全拆分）
     ../../libraries/zf_components/tflm
@@ -78,12 +79,47 @@ aux_source_directory(../../libraries/zf_common DIR_SRCS)
 aux_source_directory(../../libraries/zf_device DIR_SRCS)
 aux_source_directory(../../libraries/zf_driver DIR_SRCS)
 aux_source_directory(../../libraries/zf_components/seekfree_assistant DIR_SRCS)
+option(ENABLE_VOFA "Enable VOFA+ debug (JustFloat)" ON)
+option(VOFA_USE_TCP "VOFA+ over TCP client (else USB serial)" ON)
+set(VOFA_TCP_IP "192.168.137.1" CACHE STRING "VOFA+ PC IP (TCP server)")
+set(VOFA_TCP_PORT 1347 CACHE STRING "VOFA+ TCP server port")
+
+set(VOFA_PLUS_SRC "")
+if (ENABLE_VOFA)
+    list(APPEND VOFA_PLUS_SRC
+        ../../libraries/zf_components/vofa_plus/src/vofa_client.c)
+    if (VOFA_USE_TCP)
+        list(APPEND VOFA_PLUS_SRC
+            ../../libraries/zf_components/vofa_plus/src/vofa_port_tcp.cpp)
+    else()
+        list(APPEND VOFA_PLUS_SRC
+            ../../libraries/zf_components/vofa_plus/src/vofa_port_linux.c)
+    endif()
+endif()
 
 # 生成可执行文件 & 配置属性
-add_executable(${PROJ_NAME} ${DIR_SRCS})
+add_executable(${PROJ_NAME} ${DIR_SRCS} ${VOFA_PLUS_SRC})
 
 option(TRACK_DEBUG_LEVEL "Track debug: 0=off 1=HUD 2=HUD+serial" 1)
 target_compile_definitions(${PROJ_NAME} PRIVATE TRACK_DEBUG_LEVEL=${TRACK_DEBUG_LEVEL})
+if (ENABLE_VOFA)
+    target_compile_definitions(${PROJ_NAME} PRIVATE ENABLE_VOFA=1)
+    message(STATUS "ENABLE_VOFA=ON")
+    if (VOFA_USE_TCP)
+        target_compile_definitions(${PROJ_NAME} PRIVATE
+            VOFA_USE_TCP=1
+            VOFA_TCP_IP="${VOFA_TCP_IP}"
+            VOFA_TCP_PORT=${VOFA_TCP_PORT})
+        message(STATUS "VOFA transport: TCP ${VOFA_TCP_IP}:${VOFA_TCP_PORT}")
+    else()
+        message(STATUS "VOFA transport: serial")
+    endif()
+else()
+    message(STATUS "ENABLE_VOFA=OFF")
+endif()
+if (DEFINED VOFA_SERIAL_DEVICE)
+    target_compile_definitions(${PROJ_NAME} PRIVATE VOFA_SERIAL_DEVICE="${VOFA_SERIAL_DEVICE}")
+endif()
 
 set_target_properties(${PROJ_NAME} PROPERTIES
     INSTALL_RPATH "/opt/ls_2k0300_env/opencv_4_10_build/lib"
