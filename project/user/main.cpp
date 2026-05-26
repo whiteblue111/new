@@ -205,10 +205,10 @@ int main()
 {
     motor_init();
     imu_init();
-    // ips200.init(FB_PATH);
-    // display_init(&ips200);
+    ips200.init(FB_PATH);
+    display_init(&ips200);
     my_key_init();
-    // vision_init();
+    vision_init();
 
     /* ---------- 退出注册 ---------- */
     atexit(cleanup);
@@ -273,7 +273,7 @@ int main()
 #endif
 
 #if ENABLE_VISION_BRICK
-        // process_car_vision(rgb_img);
+        process_car_vision(rgb_cut_img);
         g_brick_avoider.process(rgb_cut_img, false);
 #endif
 #if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
@@ -300,14 +300,33 @@ int main()
         static int disp_cnt = 0;
         if (++disp_cnt % 3 == 0)
         {
-            display_show_track();
+            if (g_display_mode == DISPLAY_MODE_TRACK)
+            {
+                display_show_track();
 #if TRACK_DEBUG_LEVEL >= 1
-            display_show_debug_hud_phase_c();
-            display_show_debug_hud_phase_d();
+                display_show_debug_hud_phase_c();
+                display_show_debug_hud_phase_d();
 #if ENABLE_VISION_BRICK
-            display_show_debug_hud_redbrick(g_brick_avoider);
+                display_show_debug_hud_redbrick(g_brick_avoider);
 #endif
 #endif
+            }
+            else if (g_display_mode == DISPLAY_MODE_TRACK_RING_PARAM)
+            {
+                display_show_track();
+#if TRACK_DEBUG_LEVEL >= 1
+                display_show_debug_hud_phase_c();
+                display_show_debug_hud_phase_d();
+#if ENABLE_VISION_BRICK
+                display_show_debug_hud_redbrick(g_brick_avoider);
+#endif
+                display_show_debug_hud_ring_entry();
+#endif
+            }
+            else
+            {
+                display_show_vision();
+            }
 #if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
             dbg_stage_mark(60);
 #endif

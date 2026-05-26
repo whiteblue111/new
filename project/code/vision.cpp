@@ -6,7 +6,10 @@
 #include <opencv2/opencv.hpp>
 #include <ncnn/net.h>
 #include <cstdio>
+#include <cstring>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <csignal>
 
 using namespace std;
@@ -21,107 +24,308 @@ int   g_bypass_timer            = 0;
 const int   BYPASS_MAX_FRAMES   = 80;
 const float BYPASS_OFFSET       = 30.0f;
 
+/* ====================== 视觉绕行状态机（供 image.cpp fitting() 读取） ====================== */
+VisionBypassAction g_vision_bypass_action = VBA_STRAIGHT;
+
+/* model_roi_cut 连续失败帧计数；超过 VISION_LOST_FRAMES 视为红块离开视野 */
+static int s_no_roi_frames = 0;
+
+/* 3 帧确认机制状态（提到文件级，便于丢失红块时统一复位） */
+static int s_confirmed_index = -2; /* 已生效的"官方结果"，-2 表示未初始化 */
+static int s_candidate_index = -2; /* 当前考察期的"候选结果" */
+static int s_consecutive_cnt = 0;  /* 候选结果连续出现帧数 */
+
+/**
+ * @brief 把 NCNN 6 类标签索引映射为中线偏移动作
+ * @param idx 标签索引（0=Ambulance 1=Armored 2=Binoculars 3=Grenade 4=Guns 5=medical）
+ * @return 对应 VisionBypassAction；未知索引按 VBA_STRAIGHT 处理
+ * @sample g_vision_bypass_action = map_label_to_action(candidate_index);
+ * @note  炸药/枪支 → 左绕行；望远镜/医疗箱 → 右绕行；救护车/装甲车 → 直行
+ */
+static VisionBypassAction map_label_to_action(int idx) {
+    switch (idx) {
+        case 3: case 4: return VBA_LEFT;   /* Grenade / Guns */
+        case 2: case 5: return VBA_RIGHT;  /* Binoculars / medical */
+        case 0: case 1: default: return VBA_STRAIGHT; /* Ambulance / Armored vehicle */
+    }
+}
+
 // 实例化一个本文件内部使用的检测器
 static RedRectDetector my_detector;
 
 int block_w = 0; // 全局变量，记录当前检测到的红色块宽度
 int block_h = 0; // 全局变量，记录当前检测到的红色
 
+/* ====================== 视觉状态缓存（供 display_show_vision 读取） ====================== */
+cv::Mat g_last_roi;          /* 最近一次 model_roi_cut 成功输出的 64×64 BGR */
+cv::Mat g_last_saved_roi;    /* KEY_3 最近一次保存成功的 64×64 ROI 深拷贝 */
+int     g_last_pred_index = -1;
+float   g_last_pred_prob  = 0.0f;
+
+/* model_roi_cut 拒因：-1=未运行, 0=OK, 1=find_red_block fail, 2=block_w/h 超阈值, 3=梯形越界 */
+int g_roi_cut_reject_reason = -1;
+
+VisionSnapshotResult g_vision_snapshot_result = VSNAP_NONE;
+int                  g_vision_snapshot_ttl      = 0;
+
+static constexpr int VISION_SNAPSHOT_TTL_FRAMES = 45;
+
+static const std::vector<std::string> kVisionLabels = {
+    "Ambulance",
+    "Armored vehicle",
+    "Binoculars",
+    "Grenade",
+    "Guns",
+    "medical"
+};
+
+/**
+ * @brief 取 6 类标签数组
+ * @return 标签数组常量引用
+ * @sample auto& labels = vision_labels(); printf("%s", labels[i].c_str());
+ */
+const std::vector<std::string>& vision_labels(void) { return kVisionLabels; }
+
 // ==========================================
 // RedRectDetector 类的方法实现
 // ==========================================
-bool RedRectDetector::find_red_block(Mat& img, int& block_top, int& block_bottom, int& x_left, int& x_right) {
-    // 【修改点1】彻底删除 HSV 转换代码
-    // 之前这里的 cvtColor(img, hsv_img, COLOR_BGR2HSV); 已经被干掉了！
 
-    int scan_x_start = (int)(img.cols * 0.1f);
-    int scan_x_end = (int)(img.cols * 0.9f);
-    int scan_width = scan_x_end - scan_x_start;
-
-    vector<float> row_ratios(img.rows, 0.0f);
-    for (int y = 0; y < img.rows; y++) {
-        int red_cnt = 0;
-        // 【修改点2】直接获取原图(BGR)这一行的指针
-        Vec3b* ptr = img.ptr<Vec3b>(y);
-        for (int x = scan_x_start; x < scan_x_end; x++) {
-            // 【修改点3】调用新的极速 BGR 判断逻辑
-            if (is_red_bgr(ptr[x])) red_cnt++;
-        }
-        row_ratios[y] = (float)red_cnt / scan_width;
-    }
-
-    int confirmed_bottom = -1;
-    int red_row_count = 0;
-    for (int y = img.rows - 1; y >= 0; y--) {
-        if (row_ratios[y] >= RED_ROW_RATIO) {
-            red_row_count++;
-            if (red_row_count >= RED_CONFIRM_ROWS) {
-                confirmed_bottom = y + RED_CONFIRM_ROWS - 1;
-                break;
-            }
-        }
-        else { red_row_count = 0; }
-    }
-
-    if (confirmed_bottom < 0) return false;
-
-    int blk_top = confirmed_bottom;
-    int gap = 0;
-    for (int y = confirmed_bottom; y >= 0; y--) {
-        if (row_ratios[y] >= RED_ROW_RATIO) {
-            blk_top = y;
-            gap = 0;
-        }
-        else { if (++gap > 2) break; }
-    }
-
-    int mid_y = (blk_top + confirmed_bottom) / 2;
-    int lx = -1, rx = -1;
-    
-    // 【修改点4】找左右边界时，也直接用原图指针
-    Vec3b* mid_ptr = img.ptr<Vec3b>(mid_y);
-    for (int x = scan_x_start; x < scan_x_end; x++) {
-        if (is_red_bgr(mid_ptr[x])) { lx = x; break; }
-    }
-    for (int x = scan_x_end - 1; x >= scan_x_start; x--) {
-        if (is_red_bgr(mid_ptr[x])) { rx = x; break; }
-    }
-
-    if (lx < 0 || rx < 0 || rx <= lx) return false;
-
-    block_top = blk_top; block_bottom = confirmed_bottom;
-    x_left = lx; x_right = rx;
-    return true;
+/**
+ * @brief 把 minAreaRect 返回的 4 个角点按 TL,TR,BR,BL 顺时针顺序输出
+ * @param raw  [in]  OpenCV minAreaRect.points() 给出的原始 4 点（顺序不定）
+ * @param out  [out] 排好序的 4 点：out[0]=TL out[1]=TR out[2]=BR out[3]=BL
+ * @return  无
+ * @note 先按 y 升序分成上下两对，上面那对 x 小的是 TL、x 大的是 TR；
+ *       下面那对 x 小的是 BL、x 大的是 BR。倾斜 ±45° 内都能正确排出顺序。
+ */
+void RedRectDetector::sort_quad_clockwise_from_topleft(const Point2f raw[4], Point2f out[4]) {
+    Point2f pts[4] = { raw[0], raw[1], raw[2], raw[3] };
+    std::sort(pts, pts + 4, [](const Point2f& a, const Point2f& b) {
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+    /* 上面两点：pts[0], pts[1] —— 再按 x 分 TL / TR */
+    if (pts[0].x <= pts[1].x) { out[0] = pts[0]; out[1] = pts[1]; }
+    else                       { out[0] = pts[1]; out[1] = pts[0]; }
+    /* 下面两点：pts[2], pts[3] —— 再按 x 分 BL / BR */
+    if (pts[2].x <= pts[3].x) { out[3] = pts[2]; out[2] = pts[3]; }
+    else                       { out[3] = pts[3]; out[2] = pts[2]; }
 }
 
-bool RedRectDetector::model_roi_cut(Mat& img, Mat& roi, bool is_draw) {
-    int blk_top, blk_bottom, x_left, x_right;
-    if (!find_red_block(img, blk_top, blk_bottom, x_left, x_right)) return false;
+/**
+ * @brief 在原图中检测红色色块并输出其 4 个倾斜角点
+ * @param img      [in]  BGR 裁剪图（通常 320×130）
+ * @param corners  [out] 红块 4 角，顺序 TL_r, TR_r, BR_r, BL_r
+ * @return true 找到合法红块；false 未找到或点云不足
+ * @sample Point2f red[4]; if (find_red_block(frame, red)) { ... }
+ * @note 从底行往上逐行检查"是否有 >= MIN_CONSECUTIVE_RED 个连续红像素"来确认
+ *       红块底边 confirmed_bottom，再在该行取最长红段中点为种子；从种子做八邻域 BFS，
+ *       只在 is_red_bgr 像素上扩散，并用 max_h_cap = max(1.5×base_w, 15) 限制离种子
+ *       最大高度，避免与上方急救包红十字等红色物体粘连时被吃进去。
+ *       BFS 完成后验证：高度 < 5 行或高度 > 宽度视为不合格，跳过并继续往上找。
+ *       漫水得到的点云再喂 cv::minAreaRect 拟合旋转矩形，输出 4 角。
+ *       320×130 分辨率下红块本体仅数百像素，单帧 < 1ms。
+ */
+bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
+    const int scan_x_start = 45;
+    const int scan_x_end   = img.cols - 45;
+    const int scan_y_start = 40;
+    const int MIN_CONSECUTIVE_RED = 5;
 
-    block_w = x_right - x_left;
-    block_h = blk_bottom - blk_top;
-    // 强制紧贴红框裁剪，不再受限于 MODEL_INPUT_WIDTH
-    int side = max({ (block_w + 10), (block_h + 10) });
-
-    int cx = (x_left + x_right) / 2;
-    int x1 = cx - side / 2;
-    int y2 = blk_bottom + CROP_EDGE_PADDING;
-    int y1 = y2 - side;
-
-    target_rect = Rect(x1, y1, side, side) & Rect(0, 0, img.cols, img.rows);
-    if (target_rect.width <= 0 || target_rect.height <= 0) return false;
-
-    Mat cropped = img(target_rect);
-    resize(cropped, roi, Size(MODEL_INPUT_WIDTH, MODEL_INPUT_WIDTH), 0, 0, INTER_AREA);
-    //如果红块太小（比如宽度小于 20 像素），说明离得太远或者是个噪点，直接放弃识别
-    if (block_w < 20 || block_h < 5 ||block_w > 50 || block_h > 20) {
-        return false; 
+    if (visited_.empty() || visited_.size() != img.size() || visited_.type() != CV_8U) {
+        visited_.create(img.size(), CV_8U);
     }
+    visited_.setTo(0);
+
+    static const int dx8[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    static const int dy8[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+    int search_from = img.rows - 1; /* 每轮从此行开始往上找下一个 confirmed_bottom */
+
+    while (search_from >= scan_y_start) {
+        /* 1) 从 search_from 往上找 confirmed_bottom */
+        int confirmed_bottom = -1;
+        int red_row_count    = 0;
+        for (int y = search_from; y >= scan_y_start; y--) {
+            if (visited_.at<uchar>(y, img.cols / 2)) { red_row_count = 0; continue; }
+            Vec3b* ptr = img.ptr<Vec3b>(y);
+            bool has_run = false;
+            int run = 0;
+            for (int x = scan_x_start; x < scan_x_end; x++) {
+                if (is_red_bgr(ptr[x])) {
+                    if (++run >= MIN_CONSECUTIVE_RED) { has_run = true; break; }
+                } else { run = 0; }
+            }
+            if (has_run) {
+                red_row_count++;
+                if (red_row_count >= RED_CONFIRM_ROWS) {
+                    confirmed_bottom = y + RED_CONFIRM_ROWS - 1;
+                    break;
+                }
+            } else { red_row_count = 0; }
+        }
+        if (confirmed_bottom < 0) return false;
+
+        /* 2) 在 confirmed_bottom 向上 SEED_SEARCH_ROWS 行内找全局最长红色连续段，
+         *    取中点作 BFS 种子。倾斜红块时底行只有底角宽度，需要看几行才能拿到接近全宽。 */
+        const int SEED_SEARCH_ROWS = 10;
+        int best_lx = -1, best_rx = -1, best_w = 0;
+        int best_seed_y = confirmed_bottom;
+        const int seed_scan_top = std::max(scan_y_start, confirmed_bottom - SEED_SEARCH_ROWS + 1);
+        for (int y = confirmed_bottom; y >= seed_scan_top; y--) {
+            Vec3b* row_ptr = img.ptr<Vec3b>(y);
+            int cur_lx = -1;
+            for (int x = scan_x_start; x < scan_x_end; x++) {
+                if (is_red_bgr(row_ptr[x])) {
+                    if (cur_lx < 0) cur_lx = x;
+                } else if (cur_lx >= 0) {
+                    int w = x - cur_lx;
+                    if (w > best_w) { best_w = w; best_lx = cur_lx; best_rx = x - 1; best_seed_y = y; }
+                    cur_lx = -1;
+                }
+            }
+            if (cur_lx >= 0) {
+                int w = scan_x_end - cur_lx;
+                if (w > best_w) { best_w = w; best_lx = cur_lx; best_rx = scan_x_end - 1; best_seed_y = y; }
+            }
+        }
+        if (best_w < 8) { search_from = confirmed_bottom - 1; continue; }
+
+        const Point seed((best_lx + best_rx) / 2, best_seed_y);
+        const int base_w    = best_w;
+        const int max_h_cap = std::max(int(base_w * 1.5f), 25); /* 下限 25 兜底，倾斜大块也能爬到顶 */
+
+        /* 3) 八邻域 BFS */
+        std::vector<Point2f> blob;
+        blob.reserve(2048);
+        std::vector<Point> stk;
+        stk.reserve(2048);
+
+        stk.push_back(seed);
+        visited_.at<uchar>(seed.y, seed.x) = 1;
+
+        int blob_min_y = seed.y, blob_max_y = seed.y;
+        int blob_min_x = seed.x, blob_max_x = seed.x;
+
+        while (!stk.empty()) {
+            Point p = stk.back();
+            stk.pop_back();
+            blob.emplace_back((float)p.x, (float)p.y);
+            if (p.y < blob_min_y) blob_min_y = p.y;
+            if (p.y > blob_max_y) blob_max_y = p.y;
+            if (p.x < blob_min_x) blob_min_x = p.x;
+            if (p.x > blob_max_x) blob_max_x = p.x;
+            for (int k = 0; k < 8; k++) {
+                int nx = p.x + dx8[k];
+                int ny = p.y + dy8[k];
+                if (nx < 0 || nx >= img.cols || ny < 0 || ny >= img.rows) continue;
+                if (seed.y - ny > max_h_cap) continue;
+                uchar& v = visited_.at<uchar>(ny, nx);
+                if (v) continue;
+                if (!is_red_bgr(img.at<Vec3b>(ny, nx))) continue;
+                v = 1;
+                stk.push_back(Point(nx, ny));
+            }
+        }
+
+        const int blob_h = blob_max_y - blob_min_y + 1;
+        const int blob_w = blob_max_x - blob_min_x + 1;
+
+        /* 4) 合法性验证：点数不足 / 高度 < 5 行 / 高度 > 宽度 → 不合格，继续往上找 */
+        if (blob.size() < 40 || blob_h < 5 || blob_h > blob_w) {
+            search_from = blob_min_y - 1;
+            continue;
+        }
+
+        /* 5) minAreaRect → 4 角点；再排成 TL,TR,BR,BL */
+        RotatedRect rr = minAreaRect(blob);
+        Point2f raw[4];
+        rr.points(raw);
+        sort_quad_clockwise_from_topleft(raw, corners);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief 以红块 4 角为基准，沿碑体斜边构造图片梯形并透视裁剪为 64×64 ROI
+ * @param img      [in,out] BGR 原图；is_draw=true 时会在图上绘制梯形
+ * @param roi      [out]    透视摆正后的 64×64 BGR 图（喂给 NCNN）
+ * @param is_draw  [in]     是否在 img 上绘制图片梯形（绿）与红块斜矩形（红）
+ * @return true 裁剪成功；false 未找到红块或梯形越界或红块尺寸不合规
+ * @sample Mat roi; if (det.model_roi_cut(frame, roi, true)) ncnn_infer(roi);
+ * @note 走马观碑专用。图片宽 ≈ block_w，高 = PIC_H_RATIO × block_h（默认 3×），
+ *       沿红块左右两条斜边方向向上延伸而不是垂直于顶边，从而跟随透视；
+ *       getPerspectiveTransform + warpPerspective 一步完成「裁 + 摆正 + 缩放」，
+ *       省一次 Mat 拷贝。针对 320×240 分辨率调参。
+ */
+bool RedRectDetector::model_roi_cut(Mat& img, Mat& roi, bool is_draw) {
+    Point2f red[4]; /* TL_r, TR_r, BR_r, BL_r */
+    if (!find_red_block(img, red)) { g_roi_cut_reject_reason = 1; return false; }
+
+    /* 用斜边长度刷新老的 block_w/block_h 全局，含义更对 */
+    block_w = (int)cv::norm(red[1] - red[0]); /* |TR_r - TL_r| 顶边长 */
+    block_h = (int)cv::norm(red[3] - red[0]); /* |BL_r - TL_r| 左侧斜边长 */
+    if (block_w < 20 || block_h < 5 || block_w > 50 || block_h > 20) {
+        g_roi_cut_reject_reason = 2;
+        return false;
+    }
+
+    /* 沿左右两条斜边向上延伸 PIC_H_RATIO 倍，构造图片梯形 */
+    picture_quad[0] = red[0] + PIC_H_RATIO * (red[0] - red[3]); /* pic TL = TL_r + 3×(TL_r-BL_r) */
+    picture_quad[1] = red[1] + PIC_H_RATIO * (red[1] - red[2]); /* pic TR = TR_r + 3×(TR_r-BR_r) */
+    picture_quad[2] = red[1];                                    /* pic BR = TR_r */
+    picture_quad[3] = red[0];                                    /* pic BL = TL_r */
+
+    /* PIC_W_RATIO ≠ 1 时沿顶边方向左右扩展（保留以后调参余地） */
+    if (std::fabs(PIC_W_RATIO - 1.0f) > 1e-3f) {
+        const float k = (PIC_W_RATIO - 1.0f) * 0.5f;
+        Point2f top_dir = picture_quad[1] - picture_quad[0]; /* pic TL → pic TR */
+        Point2f bot_dir = picture_quad[2] - picture_quad[3]; /* pic BL → pic BR */
+        picture_quad[0] -= k * top_dir;
+        picture_quad[1] += k * top_dir;
+        picture_quad[3] -= k * bot_dir;
+        picture_quad[2] += k * bot_dir;
+    }
+
+    /* 任一角越界就放弃这一帧（车离碑太近 / 红块贴边） */
+    for (int i = 0; i < 4; i++) {
+        if (picture_quad[i].x < 0 || picture_quad[i].x >= img.cols ||
+            picture_quad[i].y < 0 || picture_quad[i].y >= img.rows) {
+            g_roi_cut_reject_reason = 3;
+            return false;
+        }
+    }
+
+    /* 一步到位：透视去畸变 + 缩放到 MODEL_INPUT_WIDTH × MODEL_INPUT_WIDTH */
+    const float S = (float)MODEL_INPUT_WIDTH;
+    Point2f dst[4] = { {0.0f, 0.0f}, {S - 1.0f, 0.0f}, {S - 1.0f, S - 1.0f}, {0.0f, S - 1.0f} };
+    Mat M = getPerspectiveTransform(picture_quad, dst);
+    warpPerspective(img, roi, M, Size(MODEL_INPUT_WIDTH, MODEL_INPUT_WIDTH),
+                    INTER_LINEAR, BORDER_REPLICATE);
+
+    /* 外接 bbox 留给 target_rect（兼容 HUD/外部读取） */
+    std::vector<Point2f> quad_vec(picture_quad, picture_quad + 4);
+    target_rect = boundingRect(quad_vec) & Rect(0, 0, img.cols, img.rows);
 
     if (is_draw) {
-        rectangle(img, target_rect, Scalar(0, 255, 0), 2); 
-        rectangle(img, Rect(x_left, blk_top, block_w, block_h), Scalar(0, 0, 255), 2); 
+        /* 绿：图片梯形（替代原来的轴对齐绿框） */
+        std::vector<Point> pic_i;
+        pic_i.reserve(4);
+        for (int i = 0; i < 4; i++) pic_i.emplace_back((int)picture_quad[i].x, (int)picture_quad[i].y);
+        const Point* pic_pts = pic_i.data();
+        int pic_npts = 4;
+        polylines(img, &pic_pts, &pic_npts, 1, true, Scalar(0, 255, 0), 2);
+
+        /* 红：红块斜矩形（替代原来的轴对齐红框） */
+        std::vector<Point> red_i;
+        red_i.reserve(4);
+        for (int i = 0; i < 4; i++) red_i.emplace_back((int)red[i].x, (int)red[i].y);
+        const Point* red_pts = red_i.data();
+        int red_npts = 4;
+        polylines(img, &red_pts, &red_npts, 1, true, Scalar(0, 0, 255), 2);
     }
+    g_roi_cut_reject_reason = 0;
     return true;
 }
 /**
@@ -141,6 +345,86 @@ bool RedRectDetector::model_roi_cut(Mat& img, Mat& roi, bool is_draw) {
      my_net.load_model("tiny_classifier_fp32.ncnn.bin");
      printf("[vision] NCNN 模型加载完毕！\n");
  }
+
+#define VISION_PICTURE_DIR "/home/root/picture/"
+
+/**
+ * @brief 更新 KEY_3 拍照屏显状态
+ * @param r  拍照结果枚举
+ * @return 无
+ * @note  TTL 在 display_show_vision 中递减
+ */
+static void vision_snapshot_notify(VisionSnapshotResult r)
+{
+    g_vision_snapshot_result = r;
+    g_vision_snapshot_ttl    = VISION_SNAPSHOT_TTL_FRAMES;
+}
+
+/**
+ * @brief 确保 picture 目录存在
+ * @return  true 表示目录可用
+ */
+static bool vision_ensure_picture_dir(void)
+{
+    struct stat st;
+    if (stat(VISION_PICTURE_DIR, &st) == 0)
+    {
+        if (S_ISDIR(st.st_mode))
+            return true;
+        printf("[vision] %s 存在但不是目录\n", VISION_PICTURE_DIR);
+        return false;
+    }
+    if (mkdir(VISION_PICTURE_DIR, 0755) != 0)
+    {
+        printf("[vision] mkdir %s 失败: %s\n", VISION_PICTURE_DIR, strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief 将最近一次 vision 裁切的 64×64 ROI 保存为 JPG
+ * @return  true 表示写入成功；false 表示 ROI 无效、目录创建失败或 imwrite 失败
+ * @sample  KEY_3 按下边沿 → vision_save_last_roi_to_picture();
+ * @note    文件名 pic_序号_时间戳.jpg，写入 /home/root/picture/
+ */
+bool vision_save_last_roi_to_picture(void)
+{
+    if (g_last_roi.empty()
+        || g_last_roi.cols != MODEL_INPUT_WIDTH
+        || g_last_roi.rows != MODEL_INPUT_WIDTH
+        || g_last_roi.channels() != 3)
+    {
+        printf("[vision] 无有效 64x64 ROI，未保存\n");
+        vision_snapshot_notify(VSNAP_FAIL_NO_ROI);
+        return false;
+    }
+    if (!vision_ensure_picture_dir())
+    {
+        vision_snapshot_notify(VSNAP_FAIL_DIR);
+        return false;
+    }
+
+    static unsigned s_pic_seq = 0;
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    const long long ts_sec = (long long)tv.tv_sec;
+
+    char path[256];
+    snprintf(path, sizeof(path), VISION_PICTURE_DIR "pic_%04u_%lld.jpg",
+             s_pic_seq++, (long long)ts_sec);
+
+    if (!cv::imwrite(path, g_last_roi))
+    {
+        printf("[vision] imwrite 失败: %s\n", path);
+        vision_snapshot_notify(VSNAP_FAIL_IO);
+        return false;
+    }
+    g_last_roi.copyTo(g_last_saved_roi);
+    printf("[vision] ROI 已保存: %s\n", path);
+    vision_snapshot_notify(VSNAP_OK);
+    return true;
+}
 
 // =============================================================================
 // 流水线主函数实现
@@ -181,8 +465,26 @@ void process_car_vision(cv::Mat& frame) {
     }
     // #endregion
 
+    /* 红块视野维护：连续 VISION_LOST_FRAMES 帧未拿到 ROI 视为红块离开 → 清绕行动作 */
+    if (has_roi) {
+        s_no_roi_frames = 0;
+    } else {
+        if (s_no_roi_frames <= VISION_LOST_FRAMES) ++s_no_roi_frames;
+        if (s_no_roi_frames > VISION_LOST_FRAMES && g_vision_bypass_action != VBA_STRAIGHT) {
+            std::cout << "[智能视觉] 红块离开视野，退出绕行" << std::endl;
+            g_vision_bypass_action = VBA_STRAIGHT;
+            g_is_bypassing_binoculars = false;
+            /* 复位 3 帧确认状态，下次进入视野重新走考察期 */
+            s_confirmed_index = -2;
+            s_candidate_index = -2;
+            s_consecutive_cnt = 0;
+        }
+    }
+
     if (has_roi) {
         g_dbg_stage_id = 33;
+        /* 缓存最近一次 ROI，供 display_show_vision 显示（深拷贝避免下一帧覆盖） */
+        roi.copyTo(g_last_roi);
         // ✨ [新增] 调试抓拍逻辑开始
         // static int snapshot_cnt = 0; // 静态计数器
         // if (snapshot_cnt < 5) {
@@ -252,10 +554,10 @@ void process_car_vision(cv::Mat& frame) {
         }
         // #endregion
 
-        // ✨ [修改点] 引入消抖滤波机制的三个静态变量
-        static int confirmed_index = -2; // 真正被确认并正在执行的“官方结果”
-        static int candidate_index = -2; // 正在考察期的“候选结果”
-        static int consecutive_cnt = 0;  // “候选结果”连续出现的次数
+        /* 3 帧确认机制（状态已提到文件级 static，便于丢失红块时统一复位） */
+        int& confirmed_index = s_confirmed_index;
+        int& candidate_index = s_candidate_index;
+        int& consecutive_cnt = s_consecutive_cnt;
 
         // 1. 考察候选结果
         if (max_index == candidate_index) {
@@ -268,15 +570,17 @@ void process_car_vision(cv::Mat& frame) {
         }
 
         // 2. 判断候选结果是否熬过“考察期”（连续 3 帧）
-        // 注意这里用 >= 3，因为如果车一直看着这个目标，计数器会一直加下去
-        // 2. 判断候选结果是否熬过“考察期”（连续 3 帧）
         if (consecutive_cnt >= 3) {
             
             // 3. 如果这个新确认的结果，和我们之前一直在执行的“官方结果”不一样，才触发动作和打印
             if (candidate_index != confirmed_index) {
                 g_dbg_stage_id = 36;
-                
-                std::vector<std::string> labels = {"Ambulance", "Armored vehicle", "Binoculars", "Grenade", "Guns", "medical"};
+
+                /* 更新视觉状态缓存（display_show_vision 会读这两个变量） */
+                g_last_pred_index = candidate_index;
+                g_last_pred_prob  = max_prob;
+
+                const std::vector<std::string>& labels = kVisionLabels;
                 // #region agent log
                 static int s_dbg_vision_label_cnt = 0;
                 if (s_dbg_vision_label_cnt < 8) {
@@ -301,13 +605,26 @@ void process_car_vision(cv::Mat& frame) {
                     }
                     // #endregion
                     std::cout << "[智能视觉] 连续 3 帧确认目标: " << labels[candidate_index] << std::endl;
-                    if (candidate_index == 2 && !g_is_bypassing_binoculars) {
-                        std::cout << "🔭 发现望远镜！准备向左侧绕行！" << std::endl;
-                        g_is_bypassing_binoculars = true; // 开启绕行状态
-                        g_bypass_timer = 0;               // 计时器清零
-                        
-                        // 可选：在这里调用蜂鸣器滴一声，方便调试
-                        // beep_on(); 
+
+                    /* 类别 → 中线偏移动作映射（炸药/枪支 左绕；望远镜/医疗箱 右绕；救护车/装甲车 直行） */
+                    const VisionBypassAction new_action = map_label_to_action(candidate_index);
+                    g_vision_bypass_action = new_action;
+                    /* 维持老 API 兼容：望远镜场景下保留旗标供 display HUD 使用 */
+                    g_is_bypassing_binoculars = (new_action != VBA_STRAIGHT);
+                    g_bypass_timer = 0;
+                    switch (new_action) {
+                        case VBA_LEFT:
+                            std::cout << "[智能视觉] 动作 → 左绕行（左线 +"
+                                      << VISION_BYPASS_SHIFT_PX << "px 作为中线）" << std::endl;
+                            break;
+                        case VBA_RIGHT:
+                            std::cout << "[智能视觉] 动作 → 右绕行（右线 -"
+                                      << VISION_BYPASS_SHIFT_PX << "px 作为中线）" << std::endl;
+                            break;
+                        case VBA_STRAIGHT:
+                        default:
+                            std::cout << "[智能视觉] 动作 → 直行（不偏移中线）" << std::endl;
+                            break;
                     }
                     
                     // ✨ 加入总数上限限制（比如最多只存 5 次）

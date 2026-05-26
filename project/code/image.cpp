@@ -17,6 +17,7 @@
 #include "motor.hpp"
 #include "math.hpp"
 #include "redbrick.hpp"
+#include "vision.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -249,9 +250,23 @@ void image_process(void)
                         bin_img);
     }
 
-    /* 十字/环岛可能截断俯视图边线；ROI 绿线仍在时从 pointsEdge 恢复 t_pointsEdge */
-    recover_bird_edge_if_empty(0);
-    recover_bird_edge_if_empty(1);
+    /* 十字/环岛可能截断俯视图边线；ROI 绿线仍在时从 pointsEdge 恢复 t_pointsEdge。
+     * Cross_Out / Cross_Begin 特例：只在双侧都为空时才 recover，避免单边远线/单 L 场景下
+     * 被截断或清空的对面侧被整条近线（含跨十字段）填回，骗过 select_track_state 的点数选边。 */
+    if (s_cross.flag_cross == Cross::Cross_Out
+        || s_cross.flag_cross == Cross::Cross_Begin)
+    {
+        if (t_pointsEdgeLeft_size <= 0 && t_pointsEdgeRight_size <= 0)
+        {
+            recover_bird_edge_if_empty(0);
+            recover_bird_edge_if_empty(1);
+        }
+    }
+    else
+    {
+        recover_bird_edge_if_empty(0);
+        recover_bird_edge_if_empty(1);
+    }
 
     /* 5) scene 联动（十字 / 环岛场景标记） */
     if (s_cross.flag_cross != Cross::Cross_None)      scene = (int)Scene::CrossScene;
@@ -307,7 +322,7 @@ float Image_Error_Get(void)
 
     img_err = aim_angle;
     if (s_cross.flag_cross == Cross::Cross_Out)
-        img_err = limit_float(img_err, -4.0f, 4.0f);
+        img_err = limit_float(img_err, -2.0f, 2.0f);
     return aim_angle;
 }
 
@@ -534,18 +549,18 @@ static void trackRecognition(cv::Mat &imageBinary)
 
     /* ===== 7) 角度 ===== */
     local_angle_points(s_b_t_pointsEdgeLeft,  s_b_t_pointsEdgeLeft_size,
-                       a_t_pointsEdgeLeft, 11);
+                       a_t_pointsEdgeLeft, 7);
     a_t_pointsEdgeLeft_size = (int)a_t_pointsEdgeLeft.size();
     local_angle_points(s_b_t_pointsEdgeRight, s_b_t_pointsEdgeRight_size,
-                       a_t_pointsEdgeRight, 11);
+                       a_t_pointsEdgeRight, 7);
     a_t_pointsEdgeRight_size = (int)a_t_pointsEdgeRight.size();
 
     /* ===== 8) NMS ===== */
     nms_angle(a_t_pointsEdgeLeft,  a_t_pointsEdgeLeft_size,
-              n_a_t_pointsEdgeLeft, 22);
+              n_a_t_pointsEdgeLeft, 14);
     n_a_t_pointsEdgeLeft_size = (int)n_a_t_pointsEdgeLeft.size();
     nms_angle(a_t_pointsEdgeRight, a_t_pointsEdgeRight_size,
-              n_a_t_pointsEdgeRight, 22);
+              n_a_t_pointsEdgeRight, 14);
     n_a_t_pointsEdgeRight_size = (int)n_a_t_pointsEdgeRight.size();
 
     /* ===== 9) 把等距采样后点写回 t_pointsEdge ===== */
@@ -712,6 +727,18 @@ static void fitting()
         else if (g_brick_avoider.get_force_track_type() == FORCE_LEFT_LINE)
             rb_override_ok = track_shifted_from_edge(
                 t_pointsEdgeLeft, t_pointsEdgeLeft_size, RB_CENTER_SHIFT_PX);
+    }
+
+    /* 视觉绕行优先级低于红砖避障：仅在红砖 NORMAL 且未由 brick override 写入中线时生效。
+     * 左绕行 → 左线列方向 +VISION_BYPASS_SHIFT_PX；右绕行 → 右线列方向 -VISION_BYPASS_SHIFT_PX。 */
+    if (!rb_override_ok && g_brick_avoider.get_state() == RB_STATE_NORMAL)
+    {
+        if (g_vision_bypass_action == VBA_LEFT)
+            rb_override_ok = track_shifted_from_edge(
+                t_pointsEdgeLeft,  t_pointsEdgeLeft_size,  +VISION_BYPASS_SHIFT_PX);
+        else if (g_vision_bypass_action == VBA_RIGHT)
+            rb_override_ok = track_shifted_from_edge(
+                t_pointsEdgeRight, t_pointsEdgeRight_size, -VISION_BYPASS_SHIFT_PX);
     }
 
     if (!rb_override_ok)
@@ -1328,6 +1355,9 @@ static void find_corners()
                     if (t_pointsEdgeLeft[j].x == n_a_t_pointsEdgeLeft[i].x
                      && t_pointsEdgeLeft[j].y == n_a_t_pointsEdgeLeft[i].y)
                     {
+                        /* 候选下标小于 MIN_CORNER_ID 视为鸟瞰图底部噪声，
+                         * 跳出内层匹配但不锁定，让外层 i 继续往后扫描下一个候选 */
+                        if (j < MIN_CORNER_ID) break;
                         t_L_pointLeft_id      = j;
                         is_t_L_pointLeft_find = true;
                         t_L_pointLeft         = cv::Point(t_pointsEdgeLeft[j].x,
@@ -1356,6 +1386,9 @@ static void find_corners()
                     if (t_pointsEdgeRight[j].x == n_a_t_pointsEdgeRight[i].x
                      && t_pointsEdgeRight[j].y == n_a_t_pointsEdgeRight[i].y)
                     {
+                        /* 候选下标小于 MIN_CORNER_ID 视为鸟瞰图底部噪声，
+                         * 跳出内层匹配但不锁定，让外层 i 继续往后扫描下一个候选 */
+                        if (j < MIN_CORNER_ID) break;
                         t_L_pointRight_id      = j;
                         is_t_L_pointRight_find = true;
                         t_L_pointRight         = cv::Point(t_pointsEdgeRight[j].x,

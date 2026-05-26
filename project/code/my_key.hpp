@@ -4,17 +4,17 @@
 #include "zf_common_headfile.hpp"
 
 /**
- * @brief 初始化按键 GPIO（KEY_1）
+ * @brief 初始化按键 GPIO（KEY_1/2/3）
  * @return 无
  * @sample my_key_init();
  */
 void my_key_init(void);
 
 /**
- * @brief 轮询 KEY_1，按下边沿时复位十字/环岛状态机
+ * @brief 轮询 KEY_1/2/3
  * @return 无
  * @sample my_key_poll();
- * @note  需在 image_process() 之后调用；含 3 帧消抖
+ * @note  KEY_1 复位十字/环岛；KEY_2 单击按三态循环切换显示模式；KEY_3 保存 vision 64×64 到 /home/root/picture/；需在 image_process() 之后调用
  */
 void my_key_poll(void);
 

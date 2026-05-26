@@ -18,6 +18,55 @@
 #include "general.hpp"
 #include <opencv2/opencv.hpp>
 
+/**
+ * @brief 环岛进环判定调试快照（对应 Ring_Check 中 left/right_entry_cond 子项）
+ *
+ * 说明：
+ * - `L*` 前缀字段对应左环进环判据；
+ * - `R*` 前缀字段对应右环进环判据；
+ * - 字段值统一使用 0/1，便于 IPS HUD 与串口直接显示。
+ */
+struct RingEntryDebugSnapshot
+{
+    int eval_enabled             = 0;  /**< 1=本帧执行了 Ring_None 进环判据评估 */
+    int ring_flag               = 0;  /**< 当前 Ring::flag_Ring_e */
+    int ring_cooldown           = 0;  /**< 进环冷却计数 */
+
+    int is_L_left_found         = 0;
+    int is_L_right_found        = 0;
+    int t_pointsEdgeLeft_size   = 0;
+    int t_pointsEdgeRight_size  = 0;
+    int is_left_straight        = 0;
+    int is_right_straight       = 0;
+    int t_L_pointLeft_y         = -1;
+    int t_L_pointRight_y        = -1;
+
+    int L_single_corner_ok      = 0;  /**< is_L_left_found && !is_L_right_found */
+    int R_single_corner_ok      = 0;  /**< is_L_right_found && !is_L_left_found */
+    int L_size_ok               = 0;  /**< tL<L_SMALL && tR>R_LARGE */
+    int R_size_ok               = 0;  /**< tR<L_SMALL && tL>R_LARGE */
+    int L_straight_ok           = 0;  /**< is_right_straight && !is_left_straight */
+    int R_straight_ok           = 0;  /**< is_left_straight && !is_right_straight */
+    int L_y_ok                  = 0;  /**< t_L_pointLeft.y in (30,100) */
+    int R_y_ok                  = 0;  /**< t_L_pointRight.y in (30,100) */
+    int L_outer_ok              = 0;  /**< ring_outer_edge_stable(t_pointsEdgeRight, size) */
+    int R_outer_ok              = 0;  /**< ring_outer_edge_stable(t_pointsEdgeLeft, size) */
+
+    int left_entry_cond         = 0;
+    int right_entry_cond        = 0;
+    int left_entry_confirm_cnt  = 0;
+    int right_entry_confirm_cnt = 0;
+};
+
+/**
+ * @brief 获取最近一帧 Ring_Check 的进环调试快照
+ * @param out [out] 输出调试快照结构体
+ * @return 无
+ * @sample RingEntryDebugSnapshot snap{}; ring_debug_fill_entry(snap);
+ * @note  该接口只做只读拷贝，不会改变环岛状态机。
+ */
+void ring_debug_fill_entry(RingEntryDebugSnapshot &out);
+
 
 /**
  * @brief 环岛处理类

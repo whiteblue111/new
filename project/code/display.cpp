@@ -3,10 +3,13 @@
 #include "cross.hpp"
 #include "ring.hpp"
 #include "redbrick.hpp"
+#include "vision.hpp"
 #include "zf_common_headfile.hpp"
+#include <opencv2/opencv.hpp>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 static zf_device_ips200 *s_ips = nullptr;
 
@@ -107,6 +110,190 @@ void display_init(zf_device_ips200 *ips)
     s_ips = ips;
 }
 
+/* ====================== 显示模式状态 & helpers ====================== */
+volatile int g_display_mode = DISPLAY_MODE_TRACK;
+
+/**
+ * @brief BGR 三通道 → RGB565（5-6-5，低字节在前，与 ips200.show_rgb565_image color_mode=0 对应）
+ * @param b  蓝通道 0..255
+ * @param g  绿通道 0..255
+ * @param r  红通道 0..255
+ * @return 16 位 RGB565 像素值
+ */
+static inline uint16_t bgr_to_rgb565(uint8_t b, uint8_t g, uint8_t r)
+{
+    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+/**
+ * @brief 把 BGR cv::Mat 缩放后转 RGB565，再贴到 IPS200 指定位置
+ * @param dst_x  屏幕起点 x
+ * @param dst_y  屏幕起点 y
+ * @param bgr    输入 BGR cv::Mat（CV_8UC3）；为空 / 通道不对会直接 return
+ * @param dst_w  目标宽（像素）
+ * @param dst_h  目标高（像素）
+ * @param interp cv::resize 插值方式（INTER_LINEAR / INTER_NEAREST 等）
+ * @return 无
+ * @sample show_bgr_as_rgb565(0, 0, rgb_cut_img, 240, 97, cv::INTER_LINEAR);
+ * @note 中转 buffer 在栈外用 std::vector，单次最大 240×97 + 128×128 ≈ 78 KB；
+ *       LS2K0300 用户态堆够用，针对 320×240 / ROI 64×64 调参。
+ */
+static void show_bgr_as_rgb565(int dst_x, int dst_y, const cv::Mat &bgr,
+                               int dst_w, int dst_h, int interp)
+{
+    if (!s_ips) return;
+    if (bgr.empty() || bgr.channels() != 3 || dst_w <= 0 || dst_h <= 0) return;
+
+    cv::Mat resized;
+    if (bgr.cols == dst_w && bgr.rows == dst_h)
+        resized = bgr;
+    else
+        cv::resize(bgr, resized, cv::Size(dst_w, dst_h), 0, 0, interp);
+
+    std::vector<uint16_t> rgb565((size_t)dst_w * (size_t)dst_h);
+    for (int y = 0; y < dst_h; y++)
+    {
+        const cv::Vec3b *row = resized.ptr<cv::Vec3b>(y);
+        uint16_t *dst_row = rgb565.data() + (size_t)y * (size_t)dst_w;
+        for (int x = 0; x < dst_w; x++)
+        {
+            dst_row[x] = bgr_to_rgb565(row[x][0], row[x][1], row[x][2]);
+        }
+    }
+    s_ips->show_rgb565_image((uint16)dst_x, (uint16)dst_y,
+                             rgb565.data(),
+                             (uint16)dst_w, (uint16)dst_h,
+                             (uint16)dst_w, (uint16)dst_h, 0);
+}
+
+/**
+ * @brief 设置显示模式（与当前不同才清屏并切换）
+ * @param mode  DisplayMode 枚举值（0=TRACK，1=TRACK+RING 参数，2=VISION）
+ * @return 无
+ * @sample display_set_mode(DISPLAY_MODE_VISION);
+ * @note 清屏一次防止上一个模式的边线点/HUD/彩图残留像素干扰下一帧
+ */
+void display_set_mode(int mode)
+{
+    if (mode < DISPLAY_MODE_TRACK || mode > DISPLAY_MODE_VISION) return;
+    if (mode == g_display_mode) return;
+    if (s_ips) s_ips->clear();
+    g_display_mode = mode;
+}
+
+/**
+ * @brief 在 TRACK / TRACK+RING 参数 / VISION 三个模式间循环切换
+ * @param 无 无
+ * @return 无
+ * @sample KEY_2 按下边沿 → display_toggle_mode();
+ */
+void display_toggle_mode(void)
+{
+    display_set_mode((g_display_mode + 1) % 3);
+}
+
+/**
+ * @brief 视觉模式主绘制
+ * @return 无
+ * @sample if (g_display_mode == DISPLAY_MODE_VISION) display_show_vision();
+ * @note 布局（240×320 竖屏）：
+ *       - y=0   彩图 240×97  （rgb_cut_img 320×130 → 缩放）
+ *       - y=92  文字 NOW (x=20)  SAVE (x=124)
+ *       - y=108 NOW 96×96 (x=20)  +  SAVE 96×96 (x=124)
+ *       - y=215 文字 bW/bH/Rej
+ *       - y=242 文字 Label: <name>
+ *       - y=265 文字 Prob : <float>
+ *       - y=280 文字 KEY3 Snap: OK / NO ROI / …（按键 3 拍照后约 2s）
+ *       - y=295 文字 Mode :VISION
+ *       任一图为空就在该区域写 "no data"，绝不解引用空 cv::Mat。
+ */
+void display_show_vision(void)
+{
+    if (!s_ips) return;
+
+    /* 1) 上半屏：彩图 rgb_cut_img */
+    if (!rgb_cut_img.empty() && rgb_cut_img.channels() == 3)
+    {
+        show_bgr_as_rgb565(0, 0, rgb_cut_img, 240, 97, cv::INTER_LINEAR);
+    }
+    else
+    {
+        s_ips->show_string(0, 40, "RGB CUT: no data");
+    }
+
+    /* 2) 中部：左 NOW = 当前 ROI；右 SAVE = KEY_3 最近保存 ROI（各 96×96） */
+    constexpr int ROI_DISP_W = 96;
+    constexpr int ROI_DISP_Y = 108;
+    constexpr int LEFT_X     = 20;   /* 左 96 块 [20, 116) */
+    constexpr int RIGHT_X    = 124;  /* 右 96 块 [124, 220)，中间留 8px 缝 */
+
+    s_ips->show_string(LEFT_X,  ROI_DISP_Y - 16, "NOW ");
+    s_ips->show_string(RIGHT_X, ROI_DISP_Y - 16, "SAVE");
+
+    if (!g_last_roi.empty() && g_last_roi.channels() == 3)
+    {
+        show_bgr_as_rgb565(LEFT_X, ROI_DISP_Y, g_last_roi, ROI_DISP_W, ROI_DISP_W, cv::INTER_NEAREST);
+    }
+    else
+    {
+        s_ips->show_string(LEFT_X, ROI_DISP_Y + 40, "no data ");
+    }
+
+    if (!g_last_saved_roi.empty() && g_last_saved_roi.channels() == 3)
+    {
+        show_bgr_as_rgb565(RIGHT_X, ROI_DISP_Y, g_last_saved_roi, ROI_DISP_W, ROI_DISP_W, cv::INTER_NEAREST);
+    }
+    else
+    {
+        s_ips->show_string(RIGHT_X, ROI_DISP_Y + 40, "no data ");
+    }
+
+    /* 3) 诊断行（y=215）：block_w / block_h / model_roi_cut 拒因 */
+    const char *rej_text = "init   ";
+    switch (g_roi_cut_reject_reason)
+    {
+        case 0:  rej_text = "OK     "; break;
+        case 1:  rej_text = "noRed  "; break;
+        case 2:  rej_text = "wh     "; break;
+        case 3:  rej_text = "quadOOB"; break;
+        default: rej_text = "init   "; break;
+    }
+    s_ips->show_string(0,   215, "bW:");
+    s_ips->show_int   (24,  215, block_w, 3);
+    s_ips->show_string(60,  215, "bH:");
+    s_ips->show_int   (84,  215, block_h, 3);
+    s_ips->show_string(120, 215, "Rej:");
+    s_ips->show_string(150, 215, rej_text);
+
+    /* 4) 底部文字：标签 + 置信度 + 模式 */
+    const auto &labels = vision_labels();
+    s_ips->show_string(0, 242, "Label:");
+    if (g_last_pred_index >= 0 && g_last_pred_index < (int)labels.size())
+        s_ips->show_string(56, 242, labels[g_last_pred_index].c_str());
+    else
+        s_ips->show_string(56, 242, "----            ");
+
+    s_ips->show_string(0, 265, "Prob :");
+    s_ips->show_float(56, 265, g_last_pred_prob, 4, 3);
+
+    if (g_vision_snapshot_ttl > 0)
+    {
+        const char *snap_text = "KEY3 Snap: ----";
+        switch (g_vision_snapshot_result)
+        {
+            case VSNAP_OK:            snap_text = "KEY3 Snap: OK"; break;
+            case VSNAP_FAIL_NO_ROI:   snap_text = "KEY3 Snap: NO ROI"; break;
+            case VSNAP_FAIL_DIR:      snap_text = "KEY3 Snap: DIR ERR"; break;
+            case VSNAP_FAIL_IO:       snap_text = "KEY3 Snap: SAVE ERR"; break;
+            default:                  break;
+        }
+        s_ips->show_string(0, 280, snap_text);
+        g_vision_snapshot_ttl--;
+    }
+
+    s_ips->show_string(0, 295, "Mode :VISION");
+}
+
 /* -------------------- 小工具：画一组点 -------------------- */
 void draw_points(float pts[][2], int num, int y_off, uint16 color)
 {
@@ -152,6 +339,7 @@ void display_show_overlay(int left_org_num, int right_org_num,
 
 /**
  * @brief 在 IPS200 上显示未透视二值 ROI 与最终中线
+ * @param 无 无
  * @return 无
  * @sample display_show_track();
  * @note   bin_img 320×130 横向缩放到 240 宽；绿/蓝为 ROI 边线，黄为 t_pointsEdge、红为 t_CenterEdge 俯视红点（不连线）
@@ -159,6 +347,8 @@ void display_show_overlay(int left_org_num, int right_org_num,
 void display_show_track(void)
 {
     if (!s_ips) return;
+    if (g_display_mode != DISPLAY_MODE_TRACK &&
+        g_display_mode != DISPLAY_MODE_TRACK_RING_PARAM) return;
     if (bin_img.empty() || bin_img.rows != ROI_H || bin_img.cols != COLSIMAGE) return;
 
     const int src_cols = bin_img.cols;
@@ -296,6 +486,81 @@ void display_show_debug_hud_phase_d(void)
     s_ips->show_string(200, 295, "Cv:");
     s_ips->show_int(220, 295, snap.curve_l, 1);
     s_ips->show_int(230, 295, snap.curve_r, 1);
+}
+
+/**
+ * @brief 显示环岛进环条件调试 HUD（对应 ring.cpp 88~102 的判据项）
+ * @param 无 无
+ * @return 无
+ * @sample if (g_display_mode == DISPLAY_MODE_TRACK_RING_PARAM) display_show_debug_hud_ring_entry();
+ * @note  仅在参数档叠加，布局在 y=236~284 的屏幕下方，便于实车观察进环子判据。
+ */
+void display_show_debug_hud_ring_entry(void)
+{
+    if (!s_ips) return;
+    if (g_display_mode != DISPLAY_MODE_TRACK_RING_PARAM) return;
+
+    RingEntryDebugSnapshot snap{};
+    ring_debug_fill_entry(snap);
+
+    const int y0 = 236;
+    const int y1 = 252;
+    const int y2 = 268;
+    const int y3 = 284;
+
+    s_ips->show_string(0,   y0, "e:");
+    s_ips->show_int   (14,  y0, snap.eval_enabled, 1);
+    s_ips->show_string(28,  y0, "rg:");
+    s_ips->show_int   (50,  y0, snap.ring_flag, 1);
+    s_ips->show_string(64,  y0, "cd:");
+    s_ips->show_int   (88,  y0, snap.ring_cooldown, 3);
+    s_ips->show_string(122, y0, "cf:");
+    s_ips->show_int   (146, y0, snap.left_entry_confirm_cnt, 1);
+    s_ips->show_string(156, y0, "/");
+    s_ips->show_int   (164, y0, snap.right_entry_confirm_cnt, 1);
+    s_ips->show_string(178, y0, "LC:");
+    s_ips->show_int   (200, y0, snap.left_entry_cond, 1);
+    s_ips->show_string(212, y0, "RC:");
+    s_ips->show_int   (234, y0, snap.right_entry_cond, 1);
+
+    s_ips->show_string(0,   y1, "LL:");
+    s_ips->show_int   (22,  y1, snap.is_L_left_found, 1);
+    s_ips->show_string(34,  y1, "LR:");
+    s_ips->show_int   (56,  y1, snap.is_L_right_found, 1);
+    s_ips->show_string(68,  y1, "sL:");
+    s_ips->show_int   (90,  y1, snap.is_left_straight, 1);
+    s_ips->show_string(102, y1, "sR:");
+    s_ips->show_int   (124, y1, snap.is_right_straight, 1);
+    s_ips->show_string(142, y1, "tL:");
+    s_ips->show_int   (166, y1, snap.t_pointsEdgeLeft_size, 3);
+    s_ips->show_string(196, y1, "tR:");
+    s_ips->show_int   (220, y1, snap.t_pointsEdgeRight_size, 3);
+
+    s_ips->show_string(0,   y2, "Ly:");
+    s_ips->show_int   (22,  y2, snap.t_L_pointLeft_y, 3);
+    s_ips->show_string(54,  y2, "Ry:");
+    s_ips->show_int   (76,  y2, snap.t_L_pointRight_y, 3);
+    s_ips->show_string(108, y2, "Lc:");
+    s_ips->show_int   (130, y2, snap.L_single_corner_ok, 1);
+    s_ips->show_string(142, y2, "sz:");
+    s_ips->show_int   (164, y2, snap.L_size_ok, 1);
+    s_ips->show_string(176, y2, "st:");
+    s_ips->show_int   (198, y2, snap.L_straight_ok, 1);
+    s_ips->show_string(210, y2, "y:");
+    s_ips->show_int   (224, y2, snap.L_y_ok, 1);
+
+    s_ips->show_string(0,   y3, "Rc:");
+    s_ips->show_int   (22,  y3, snap.R_single_corner_ok, 1);
+    s_ips->show_string(34,  y3, "sz:");
+    s_ips->show_int   (56,  y3, snap.R_size_ok, 1);
+    s_ips->show_string(68,  y3, "st:");
+    s_ips->show_int   (90,  y3, snap.R_straight_ok, 1);
+    s_ips->show_string(102, y3, "y:");
+    s_ips->show_int   (116, y3, snap.R_y_ok, 1);
+    s_ips->show_string(124, y3, "o:");
+    s_ips->show_int   (136, y3, snap.R_outer_ok, 1);
+    s_ips->show_string(156, y3, "Lo:");
+    s_ips->show_int   (178, y3, snap.L_outer_ok, 1);
 }
 
 /**

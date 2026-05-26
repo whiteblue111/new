@@ -8,6 +8,8 @@
  */
 
 #include "cross.hpp"
+#include "image.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -93,14 +95,12 @@ void Cross::reset()
 /**
  * @brief 十字识别（仅状态转移，不修改边线）
  * @sample 见 cross.hpp
- * @note   进入条件需连续两帧满足下列三种之一：
- *           1) 左右双 L 角点均找到，且角点未到边线末端 5 点以内
- *           2) 仅左 L 找到，且右边线 < 0.3/SAMPLE_DIST 点（右侧丢线）
- *           3) 仅右 L 找到，且左边线 < 0.3/SAMPLE_DIST 点（左侧丢线）
+ * @note   进入条件需连续两帧满足：左右双 L 均找到、角点不在边线首尾 3 点内、
+ *         边线点数 < 100，且两角点欧氏距离满足 cross_L_dist_min < dist < cross_L_dist_max（透视图像素）
  */
 void Cross::Cross_Check(bool is_L_left_found, bool is_L_right_found,
                         cv::Mat /*imgBinary*/,
-                        cv::Point /*t_L_pointLeft*/, cv::Point /*t_L_pointRight*/,
+                        cv::Point t_L_pointLeft,cv::Point t_L_pointRight,
                         int t_L_pointLeft_id, int t_L_pointRight_id,
                         int t_pointsEdgeLeft_size, int t_pointsEdgeRight_size,
                         bool is_both_straight)
@@ -111,11 +111,15 @@ void Cross::Cross_Check(bool is_L_left_found, bool is_L_right_found,
         return;
     }
 
+    const double L_corner_dist = cv::norm(t_L_pointRight - t_L_pointLeft);
+
     bool cond =
         (is_L_left_found && is_L_right_found
-            && t_L_pointLeft_id  < t_pointsEdgeLeft_size  - 3
-            && t_L_pointRight_id < t_pointsEdgeRight_size - 3
-        && t_L_pointLeft_id > 3 && t_L_pointRight_id > 3 &&t_pointsEdgeLeft_size < 100 && t_pointsEdgeRight_size < 100 );
+            && t_L_pointLeft_id  < t_pointsEdgeLeft_size  - 2
+            && t_L_pointRight_id < t_pointsEdgeRight_size - 2
+            && t_L_pointLeft_id > 1 && t_L_pointRight_id > 1
+            && (t_pointsEdgeLeft_size < 60 || t_pointsEdgeRight_size < 60)
+            && L_corner_dist > cross_L_dist_min && L_corner_dist < cross_L_dist_max);
     //  || (is_L_left_found  && t_L_pointLeft_id  < 0.70 / SAMPLE_DIST
     //         && t_pointsEdgeRight_size < 0.30 / SAMPLE_DIST)
     //  || (is_L_right_found && t_L_pointRight_id < 0.70 / SAMPLE_DIST
@@ -168,8 +172,8 @@ void Cross::Cross_Run(std::vector<POINT> &t_pointsEdgeLeft,
     /* ====== 状态机：Begin → Out ====== */
     else if (flag_cross == Cross_Begin && Cross_counter > 5 &&
              ((!is_L_left_found && !is_L_right_found)
-              || (is_L_left_found  && t_L_pointLeft_id  < 0.25 / SAMPLE_DIST)
-              || (is_L_right_found && t_L_pointRight_id < 0.25 / SAMPLE_DIST)
+              || (is_L_left_found  && t_L_pointLeft_id  < 0.18 / SAMPLE_DIST)
+              || (is_L_right_found && t_L_pointRight_id < 0.18 / SAMPLE_DIST)
               || (t_pointsEdgeLeft_size  < 0.10 / SAMPLE_DIST
                && t_pointsEdgeRight_size < 0.10 / SAMPLE_DIST)
               || (Cross_counter > 600)))
@@ -180,24 +184,31 @@ void Cross::Cross_Run(std::vector<POINT> &t_pointsEdgeLeft,
         no_line_counter = 0;
     }
 
-    /* ====== 状态机：Begin 期间——截断边线到 L 角点（同步 vector，避免 size>vec 越界） ====== */
+    /* ====== 状态机：Begin 期间——截断边线到 L 角点（同步 vector，避免 size>vec 越界）
+     *  优先巡有角点的一侧：单 L 时清空对面无角点的边线，避免 select_track_state 因点数被对面夺走。
+     *  - 双 L 都找到: 两侧统一截到 min(leftId, rightId)（语义同旧实现）
+     *  - 只找到左 L: 截左线到 leftId，右线整条清空
+     *  - 只找到右 L: 截右线到 rightId，左线整条清空
+     *  - 两侧都没找到: 不动边线 ====== */
     if (flag_cross == Cross_Begin && !is_both_straight)
     {
-        if (is_L_left_found)
+        if (is_L_left_found && is_L_right_found)
         {
-            truncate_edge_to_id(t_pointsEdgeLeft,  t_pointsEdgeLeft_size,  t_L_pointLeft_id);
-            truncate_edge_to_id(t_pointsEdgeRight, t_pointsEdgeRight_size, t_L_pointLeft_id);
+            const int cut_id = std::min(t_L_pointLeft_id, t_L_pointRight_id);
+            truncate_edge_to_id(t_pointsEdgeLeft,  t_pointsEdgeLeft_size,  cut_id);
+            truncate_edge_to_id(t_pointsEdgeRight, t_pointsEdgeRight_size, cut_id);
         }
-        if (is_L_right_found)
+        else if (is_L_left_found)
+        {
+            truncate_edge_to_id(t_pointsEdgeLeft, t_pointsEdgeLeft_size, t_L_pointLeft_id);
+            t_pointsEdgeRight.clear();
+            t_pointsEdgeRight_size = 0;
+        }
+        else if (is_L_right_found)
         {
             truncate_edge_to_id(t_pointsEdgeRight, t_pointsEdgeRight_size, t_L_pointRight_id);
-            if (is_L_left_found)
-                truncate_edge_to_id(t_pointsEdgeLeft, t_pointsEdgeLeft_size, t_L_pointRight_id);
-            else
-            {
-                t_pointsEdgeLeft.clear();
-                t_pointsEdgeLeft_size = 0;
-            }
+            t_pointsEdgeLeft.clear();
+            t_pointsEdgeLeft_size = 0;
         }
     }
 
@@ -263,8 +274,20 @@ void Cross::cross_find_farline(cv::Mat &img,
         general.Reverse_transf(far_left_x0, far_left_y0,
                                t_pointsEdgeLeft[t_L_pointLeft_id].x,
                                t_pointsEdgeLeft[t_L_pointLeft_id].y);
-        far_left_y0 -= 5;
-        // far_left_x0 = 18;
+        bool left_below_all_white = true;
+        for (int i = 1; i <= 5; i++)
+        {
+            int cy = far_left_y0 + i;
+            if (cy < 0 || cy >= ROI_H
+                || far_left_x0 < 0 || far_left_x0 >= COLSIMAGE
+                || img.at<unsigned char>(cy, far_left_x0) < 128)
+            {
+                left_below_all_white = false;
+                break;
+            }
+        }
+        far_left_y0 -= 10;
+        far_left_x0 -= left_below_all_white ? 15 : 3;
         L_left_found = true;
     }
     if (is_L_right_found
@@ -274,8 +297,20 @@ void Cross::cross_find_farline(cv::Mat &img,
         general.Reverse_transf(far_right_x0, far_right_y0,
                                t_pointsEdgeRight[t_L_pointRight_id].x,
                                t_pointsEdgeRight[t_L_pointRight_id].y);
-        far_right_y0 -= 5;
-        // far_right_x0 += 18;
+        bool below_all_white = true;
+        for (int i = 1; i <= 5; i++)
+        {
+            int cy = far_right_y0 + i;
+            if (cy < 0 || cy >= ROI_H
+                || far_right_x0 < 0 || far_right_x0 >= COLSIMAGE
+                || img.at<unsigned char>(cy, far_right_x0) < 128)
+            {
+                below_all_white = false;
+                break;
+            }
+        }
+        far_right_y0 -= 10;
+        far_right_x0 += below_all_white ? 15 : 3;
         L_right_found = true;
     }
     if (far_left_x0  < 0 || far_left_x0  >= COLSIMAGE
@@ -362,18 +397,18 @@ void Cross::cross_find_farline(cv::Mat &img,
 
     /* ---- 角度 ---- */
     local_angle_points(far_s_b_t_pointsEdgeLeft, far_s_b_t_pointsEdgeLeft_size,
-                       far_a_t_pointsEdgeLeft, 11);
+                       far_a_t_pointsEdgeLeft, 7);
     far_a_t_pointsEdgeLeft_size = (int)far_a_t_pointsEdgeLeft.size();
     local_angle_points(far_s_b_t_pointsEdgeRight, far_s_b_t_pointsEdgeRight_size,
-                       far_a_t_pointsEdgeRight, 11);
+                       far_a_t_pointsEdgeRight, 7);
     far_a_t_pointsEdgeRight_size = (int)far_a_t_pointsEdgeRight.size();
 
     /* ---- NMS ---- */
     nms_angle(far_a_t_pointsEdgeLeft, far_a_t_pointsEdgeLeft_size,
-              far_n_a_t_pointsEdgeLeft, 22);
+              far_n_a_t_pointsEdgeLeft, 14);
     far_n_a_t_pointsEdgeLeft_size = (int)far_n_a_t_pointsEdgeLeft.size();
     nms_angle(far_a_t_pointsEdgeRight, far_a_t_pointsEdgeRight_size,
-              far_n_a_t_pointsEdgeRight, 22);
+              far_n_a_t_pointsEdgeRight, 14);
     far_n_a_t_pointsEdgeRight_size = (int)far_n_a_t_pointsEdgeRight.size();
 
     /* 把等距采样后的点序列同步写回 far_t_pointsEdge */
@@ -647,8 +682,8 @@ void Cross::find_corners()
             int im1 = general.clip(i - 2, 0, far_n_a_t_pointsEdgeLeft_size - 1);
             int ip1 = general.clip(i + 2, 0, far_n_a_t_pointsEdgeLeft_size - 1);
             float conf = std::fabs(far_n_a_t_pointsEdgeLeft[i].angle)
-                       - (std::fabs(far_n_a_t_pointsEdgeLeft[im1].angle
-                                   + std::fabs(far_n_a_t_pointsEdgeLeft[ip1].angle))) / 2;
+                       - (std::fabs(far_n_a_t_pointsEdgeLeft[im1].angle)
+                        + std::fabs(far_n_a_t_pointsEdgeLeft[ip1].angle)) / 2;
             conf = conf * 180.0f / PI;
             conf = std::fabs(conf);
 
@@ -659,6 +694,7 @@ void Cross::find_corners()
                     if (far_t_pointsEdgeLeft[j].x == far_n_a_t_pointsEdgeLeft[i].x
                      && far_t_pointsEdgeLeft[j].y == far_n_a_t_pointsEdgeLeft[i].y)
                     {
+                        if (j < MIN_CORNER_ID) break;
                         far_t_L_pointLeft_id      = j;
                         is_far_t_L_pointLeft_find = true;
                         break;
@@ -675,8 +711,8 @@ void Cross::find_corners()
             int im1 = general.clip(i - 2, 0, far_n_a_t_pointsEdgeRight_size - 1);
             int ip1 = general.clip(i + 2, 0, far_n_a_t_pointsEdgeRight_size - 1);
             float conf = std::fabs(far_n_a_t_pointsEdgeRight[i].angle)
-                       - (std::fabs(far_n_a_t_pointsEdgeRight[im1].angle
-                                   + std::fabs(far_n_a_t_pointsEdgeRight[ip1].angle))) / 2;
+                       - (std::fabs(far_n_a_t_pointsEdgeRight[im1].angle)
+                        + std::fabs(far_n_a_t_pointsEdgeRight[ip1].angle)) / 2;
             conf = conf * 180.0f / PI;
             conf = std::fabs(conf);
 
@@ -687,6 +723,7 @@ void Cross::find_corners()
                     if (far_t_pointsEdgeRight[j].x == far_n_a_t_pointsEdgeRight[i].x
                      && far_t_pointsEdgeRight[j].y == far_n_a_t_pointsEdgeRight[i].y)
                     {
+                        if (j < MIN_CORNER_ID) break;
                         far_t_L_pointRight_id      = j;
                         is_far_t_L_pointRight_find = true;
                         break;

@@ -48,4 +48,46 @@ void display_show_debug_hud_phase_d(void);
  */
 void display_show_debug_hud_redbrick(const RedBlockAvoider &av);
 
+/* ====================== 显示模式切换 ====================== */
+enum DisplayMode {
+    DISPLAY_MODE_TRACK            = 0,   /* 普通档：保持当前 TRACK 显示行为 */
+    DISPLAY_MODE_TRACK_RING_PARAM = 1,   /* 参数档：TRACK + 环岛进环判据 HUD */
+    DISPLAY_MODE_VISION           = 2    /* 视觉档：彩图 + ROI + 标签文字 */
+};
+
+extern volatile int g_display_mode;
+
+/**
+ * @brief 设置显示模式（切换时会清屏一次，避免上一个模式残留像素）
+ * @param mode  DisplayMode 枚举值
+ * @return 无
+ * @sample display_set_mode(DISPLAY_MODE_VISION);
+ */
+void display_set_mode(int mode);
+
+/**
+ * @brief 在 TRACK / TRACK+RING 参数 / VISION 三个模式间循环切换
+ * @param 无 无
+ * @return 无
+ * @sample KEY_2 按下边沿 → display_toggle_mode();
+ */
+void display_toggle_mode(void);
+
+/**
+ * @brief 视觉模式主绘制：上=rgb_cut_img 240x97 彩图，中=g_last_roi 放大 128x128，下=标签/置信度
+ * @return 无
+ * @sample if (g_display_mode == DISPLAY_MODE_VISION) display_show_vision();
+ * @note 内部把 BGR cv::Mat 在线性 buffer 上转 RGB565 再交给 ips200.show_rgb565_image
+ */
+void display_show_vision(void);
+
+/**
+ * @brief 显示环岛进环条件调试 HUD（对应 ring.cpp 88~102 的判据项）
+ * @param 无 无
+ * @return 无
+ * @sample if (g_display_mode == DISPLAY_MODE_TRACK_RING_PARAM) display_show_debug_hud_ring_entry();
+ * @note  仅在参数档叠加，并布局到屏幕下方，避免遮挡主图与边线。
+ */
+void display_show_debug_hud_ring_entry(void);
+
 #endif  

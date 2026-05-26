@@ -71,7 +71,10 @@ public:
      * @param t_L_pointRight_id 右 L 角点在 t_pointsEdgeRight 中的下标
      * @param t_pointsEdgeLeft_size  左透视边线点数
      * @param t_pointsEdgeRight_size 右透视边线点数
-     * @sample cross.Cross_Check(L_l_found, L_r_found, bin, L_pt_l, L_pt_r, L_l_id, L_r_id, lsz, rsz);
+     * @param is_both_straight       左右边线均近似直线时为真，清零计数并跳过判定
+     * @sample cross.Cross_Check(L_l_found, L_r_found, bin, L_pt_l, L_pt_r, L_l_id, L_r_id, lsz, rsz, straight);
+     * @note  进入条件需连续两帧满足：左右双 L 均找到、角点不在边线首尾 3 点内、
+     *        边线点数 < 100，且两角点欧氏距离满足 cross_L_dist_min < dist < cross_L_dist_max（透视图像素）
      */
     void Cross_Check(bool is_L_left_found, bool is_L_right_found,
                      cv::Mat imgBinary,
@@ -135,6 +138,10 @@ public:
     /* L 角点置信度门限（角度，单位：度） */
     int Lconf_Min = 70;
     int Lconf_Max = 130;
+
+    /** 双 L 角点最小/最大间距（透视图像素，用于 Cross_Check 进入判定） */
+    double cross_L_dist_min = 25.0;
+    double cross_L_dist_max = 55.0;
 
     int left_cross_in_counter  = 0;
     int right_cross_in_counter = 0;

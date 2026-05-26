@@ -37,8 +37,9 @@
 #define rowCutUp_roi     5                 /* 15，ROI 局部行号 */
 #define seed_y_roi       (ROI_H - 1)       /* 129，floodFill 种子局部行 */
 #define WIDTH            COLSIMAGE
-#define LCONF_MIN        70
-#define LCONF_MAX        130
+#define LCONF_MIN        60
+#define LCONF_MAX        120
+#define MIN_CORNER_ID    5      /* L 角点下标下限，避免误识鸟瞰图最底部 */
 
 
 
