@@ -42,8 +42,9 @@ using namespace cv;
 /** 1=三串环：速度 2ms + 角速度 6ms + 角度 18ms；验证阶段建议低速 g_target_speed */
 #define ENABLE_MOTOR_CLOSED_LOOP 1
 
-/** 1=主循环调用 NCNN 碑识别 + 红砖避障状态机 */
+/** 1=红砖避障状态机 + HUD；0=关闭（与 ENABLE_VISION_NCNN 独立） */
 #define ENABLE_VISION_BRICK      1
+/* ENABLE_VISION_NCNN / ENABLE_VISION_BYPASS 见 app_config.h */
 
 /** 1=终端打印图像偏差 img_err（像素）；0=关闭 */
 #define IMG_ERR_PRINT_ENABLE     0
@@ -52,7 +53,9 @@ using namespace cv;
 
 /*
  * 段错误二分（app_config.h 中 APP_TERMINAL_DEBUG=1 时配合 [dbg] stage= 探针）：
- *   ENABLE_VISION_BRICK 0  -> 排除 NCNN / 红砖
+ *   ENABLE_VISION_BRICK 0     -> 排除红砖避障
+ *   ENABLE_VISION_NCNN 0        -> 排除 process_car_vision（app_config.h）
+ *   ENABLE_VISION_BYPASS 0      -> 识别不改中线（默认）
  *   ENABLE_MOTOR_CLOSED_LOOP 0 -> 排除 PIT 速度/角度环
  *   TRACK_DEBUG_LEVEL 0 (CMake) -> 排除串口 HUD / display_show_*
  *   tcp_ok=false 或注释 seekfree_assistant_camera_send -> 排除 TCP 发包
@@ -205,8 +208,8 @@ int main()
 {
     motor_init();
     imu_init();
-    ips200.init(FB_PATH);
-    display_init(&ips200);
+    // ips200.init(FB_PATH);
+    // display_init(&ips200);
     my_key_init();
     vision_init();
 
@@ -238,7 +241,7 @@ int main()
     }
 
 #if ENABLE_MOTOR_CLOSED_LOOP
-    g_target_speed = 1.0f;
+    g_target_speed = 1.5f;
     pit_timer.init_ms(2, pit_callback_speed);
     pit_yaw_spd.init_ms(6, pit_callback_yaw_spd);
 #if YAW_SPD_TUNE_MODE
@@ -273,7 +276,9 @@ int main()
 #endif
 
 #if ENABLE_VISION_BRICK
+#  if ENABLE_VISION_NCNN
         process_car_vision(rgb_cut_img);
+#  endif
         g_brick_avoider.process(rgb_cut_img, false);
 #endif
 #if defined(ENABLE_TERMINAL_DEBUG) && (ENABLE_TERMINAL_DEBUG == 1)
@@ -315,11 +320,6 @@ int main()
             {
                 display_show_track();
 #if TRACK_DEBUG_LEVEL >= 1
-                display_show_debug_hud_phase_c();
-                display_show_debug_hud_phase_d();
-#if ENABLE_VISION_BRICK
-                display_show_debug_hud_redbrick(g_brick_avoider);
-#endif
                 display_show_debug_hud_ring_entry();
 #endif
             }

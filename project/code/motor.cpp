@@ -52,8 +52,8 @@ volatile float g_target_yaw_spd = 0.0f;
 PID_Inc_Datatypedef pid_speed_l = PID_INC_INIT(1000.00f, 10.00f, 0.0f);  //5.00 15.00 0.0
 PID_Inc_Datatypedef pid_speed_r = PID_INC_INIT(1000.00f, 10.00f, 0.0f); 
 // PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
-PID_Pos_Datatypedef pid_yaw_spd = PID_POS_INIT(0.015f, 0.0f, 0.0f, 0.0f);   //角速度环位置式PD，P=0.015 I=0 D=0.006
-PD_Double  pd_yaw               = PD_DOUBLE_INIT(5.0f, 1.0f, 0.5f, 0.00f); //双pd角度环 0.017 0.0003 0.00 0.002
+PID_Pos_Datatypedef pid_yaw_spd = PID_POS_INIT(0.012f, 0.0f, 0.00f, 0.0f);   //角速度环位置式PD，P=0.015 I=0 D=0.006
+PD_Double  pd_yaw               = PD_DOUBLE_INIT(5.2f, 1.5f, 2.0f, 0.00f); //双pd角度环 5.0 1.0 0.5 0.002
 /* ====================== 增量式速度环内部累计占空比 ====================== */  
 static float duty_l_out = 0.0f;  
 static float duty_r_out = 0.0f;  
@@ -171,6 +171,9 @@ int get_dist ()
     duty_r_out += PID_Inc(&pid_speed_r, g_target_speed + g_u_yaw - g_speed_r);  
     duty_l_out = limit_float(duty_l_out, -MAX_PWM, MAX_PWM);  
     duty_r_out = limit_float(duty_r_out, -MAX_PWM, MAX_PWM);  
+    // duty_l_out = limit_float(3000, -MAX_PWM, MAX_PWM);  
+    // duty_r_out = limit_float(3000, -MAX_PWM, MAX_PWM);  
+
 
     motor_set_lr((int)duty_l_out, (int)duty_r_out);  
     // g_speed_loop_cnt++;//统计pid计算时间    

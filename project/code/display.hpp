@@ -51,7 +51,7 @@ void display_show_debug_hud_redbrick(const RedBlockAvoider &av);
 /* ====================== 显示模式切换 ====================== */
 enum DisplayMode {
     DISPLAY_MODE_TRACK            = 0,   /* 普通档：保持当前 TRACK 显示行为 */
-    DISPLAY_MODE_TRACK_RING_PARAM = 1,   /* 参数档：TRACK + 环岛进环判据 HUD */
+    DISPLAY_MODE_TRACK_RING_PARAM = 1,   /* 参数档：TRACK 稀疏主图 + 环岛进环判据 HUD（无 phase C/D） */
     DISPLAY_MODE_VISION           = 2    /* 视觉档：彩图 + ROI + 标签文字 */
 };
 
@@ -86,7 +86,7 @@ void display_show_vision(void);
  * @param 无 无
  * @return 无
  * @sample if (g_display_mode == DISPLAY_MODE_TRACK_RING_PARAM) display_show_debug_hud_ring_entry();
- * @note  仅在参数档叠加，并布局到屏幕下方，避免遮挡主图与边线。
+ * @note  仅在参数档叠加；y=248 总判据，y=264 左右 5 子项（0/1），无 phase C/D。
  */
 void display_show_debug_hud_ring_entry(void);
 

@@ -1,4 +1,5 @@
-#include "zf_common_headfile.hpp"
+#include "app_config.h"
+#include "vision.hpp"
 #include <iostream>
 #include <vector>
 #include <string>
@@ -120,8 +121,8 @@ void RedRectDetector::sort_quad_clockwise_from_topleft(const Point2f raw[4], Poi
  * @sample Point2f red[4]; if (find_red_block(frame, red)) { ... }
  * @note 从底行往上逐行检查"是否有 >= MIN_CONSECUTIVE_RED 个连续红像素"来确认
  *       红块底边 confirmed_bottom，再在该行取最长红段中点为种子；从种子做八邻域 BFS，
- *       只在 is_red_bgr 像素上扩散，并用 max_h_cap = max(1.5×base_w, 15) 限制离种子
- *       最大高度，避免与上方急救包红十字等红色物体粘连时被吃进去。
+ *       只在 is_red_bgr 像素上扩散，并用 max_h_cap 限制离种子最大高度，
+ *       避免与上方急救包红十字等红色物体粘连时被吃进去。
  *       BFS 完成后验证：高度 < 5 行或高度 > 宽度视为不合格，跳过并继续往上找。
  *       漫水得到的点云再喂 cv::minAreaRect 拟合旋转矩形，输出 4 角。
  *       320×130 分辨率下红块本体仅数百像素，单帧 < 1ms。
@@ -193,7 +194,7 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
 
         const Point seed((best_lx + best_rx) / 2, best_seed_y);
         const int base_w    = best_w;
-        const int max_h_cap = std::max(int(base_w * 1.5f), 25); /* 下限 25 兜底，倾斜大块也能爬到顶 */
+        const int max_h_cap = std::max(int(base_w * 2.5f), 25); /* 下限 25 兜底，倾斜大块也能爬到顶 */
 
         /* 3) 八邻域 BFS */
         std::vector<Point2f> blob;
@@ -232,7 +233,7 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
         const int blob_w = blob_max_x - blob_min_x + 1;
 
         /* 4) 合法性验证：点数不足 / 高度 < 5 行 / 高度 > 宽度 → 不合格，继续往上找 */
-        if (blob.size() < 40 || blob_h < 5 || blob_h > blob_w) {
+        if (blob.size() < 40 || blob_h < 5 || blob_h > 1.5*blob_w) {
             search_from = blob_min_y - 1;
             continue;
         }
@@ -266,7 +267,7 @@ bool RedRectDetector::model_roi_cut(Mat& img, Mat& roi, bool is_draw) {
     /* 用斜边长度刷新老的 block_w/block_h 全局，含义更对 */
     block_w = (int)cv::norm(red[1] - red[0]); /* |TR_r - TL_r| 顶边长 */
     block_h = (int)cv::norm(red[3] - red[0]); /* |BL_r - TL_r| 左侧斜边长 */
-    if (block_w < 20 || block_h < 5 || block_w > 50 || block_h > 20) {
+    if (block_w < 15 || block_h < 5 || block_w > 55 || block_h > 30) {
         g_roi_cut_reject_reason = 2;
         return false;
     }
@@ -333,12 +334,12 @@ bool RedRectDetector::model_roi_cut(Mat& img, Mat& roi, bool is_draw) {
  * @param 无
  * @return 无（加载失败 NCNN 内部 printf 报错，对象保持空状态）
  * @sample vision_init();
- * @note LS2K0300 无 FP16 加速，强制 FP32；2 线程对应 LA264 双核
+ * @note LS2K0300 无 FP16 加速，强制 FP32；LS2K0300 单核 LA264，单线程避免与主线程争抢
  */
  void vision_init(void)
  {
      printf("[vision] 正在加载 NCNN 模型...\n");
-     my_net.opt.num_threads        = 2;
+     my_net.opt.num_threads        = 1;
      my_net.opt.use_fp16_arithmetic = false;
      my_net.opt.use_fp16_storage    = false;
      my_net.load_param("tiny_classifier_fp32.ncnn.param");
@@ -606,6 +607,7 @@ void process_car_vision(cv::Mat& frame) {
                     // #endregion
                     std::cout << "[智能视觉] 连续 3 帧确认目标: " << labels[candidate_index] << std::endl;
 
+#if ENABLE_VISION_BYPASS
                     /* 类别 → 中线偏移动作映射（炸药/枪支 左绕；望远镜/医疗箱 右绕；救护车/装甲车 直行） */
                     const VisionBypassAction new_action = map_label_to_action(candidate_index);
                     g_vision_bypass_action = new_action;
@@ -626,26 +628,10 @@ void process_car_vision(cv::Mat& frame) {
                             std::cout << "[智能视觉] 动作 → 直行（不偏移中线）" << std::endl;
                             break;
                     }
-                    
-                    // ✨ 加入总数上限限制（比如最多只存 5 次）
-                    static int valid_hit_cnt = 0; 
-                    if (valid_hit_cnt < 5) {
-                        g_dbg_stage_id = 38;
-                        std::string roi_name = "target_" + std::to_string(valid_hit_cnt) + "_" + labels[candidate_index] + "_roi.jpg";
-                        std::string full_name = "target_" + std::to_string(valid_hit_cnt) + "_full.jpg";
-                        
-                        cv::imwrite(roi_name, roi);
-                        g_dbg_stage_id = 39;
-                        cv::imwrite(full_name, frame);
-                        g_dbg_stage_id = 40;
-                        
-                        std::cout << "📸 抓拍成功！已保存: " << roi_name << " (进度: " << valid_hit_cnt + 1 << "/5)" << std::endl;
-                        valid_hit_cnt++;
-                    } else {
-                        std::cout << "⚠️ 抓拍名额已满(5张)，本次不再保存图片。" << std::endl;
-                    }
-
-                    // 💡 你的小车动作代码...
+#else
+                    std::cout << "[智能视觉] 已识别: " << labels[candidate_index]
+                              << "（绕行关闭，不改中线）" << std::endl;
+#endif
                 }
                  else {
                     std::cout << "[智能视觉] 确认目标已丢失" << std::endl;

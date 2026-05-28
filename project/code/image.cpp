@@ -18,6 +18,7 @@
 #include "math.hpp"
 #include "redbrick.hpp"
 #include "vision.hpp"
+#include "banmaxian.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -235,6 +236,9 @@ void image_process(void)
                       t_pointsEdgeLeft_size, t_pointsEdgeRight_size,
                       both_straight);
 
+    /* 4.5) 斑马线识别（仅检测，无控制；需先看到一次 Cross_Begin） */
+    banmaxian_check(bin_img, (int)s_cross.flag_cross);
+
     if (s_cross.flag_cross == Cross::Cross_None)
     {
         s_ring.Ring_Check(bin_img,
@@ -290,6 +294,7 @@ void track_elements_reset(void)
 {
     s_cross.reset();
     s_ring.reset();
+    banmaxian_reset();
     scene = (int)Scene::NormalScene;
 }
 
@@ -321,8 +326,8 @@ float Image_Error_Get(void)
     }
 
     img_err = aim_angle;
-    if (s_cross.flag_cross == Cross::Cross_Out)
-        img_err = limit_float(img_err, -2.0f, 2.0f);
+    // if (s_cross.flag_cross == Cross::Cross_Out)
+    //     img_err = limit_float(img_err, -2.0f, 2.0f);
     return aim_angle;
 }
 
@@ -729,6 +734,7 @@ static void fitting()
                 t_pointsEdgeLeft, t_pointsEdgeLeft_size, RB_CENTER_SHIFT_PX);
     }
 
+#if ENABLE_VISION_BYPASS
     /* 视觉绕行优先级低于红砖避障：仅在红砖 NORMAL 且未由 brick override 写入中线时生效。
      * 左绕行 → 左线列方向 +VISION_BYPASS_SHIFT_PX；右绕行 → 右线列方向 -VISION_BYPASS_SHIFT_PX。 */
     if (!rb_override_ok && g_brick_avoider.get_state() == RB_STATE_NORMAL)
@@ -740,6 +746,7 @@ static void fitting()
             rb_override_ok = track_shifted_from_edge(
                 t_pointsEdgeRight, t_pointsEdgeRight_size, -VISION_BYPASS_SHIFT_PX);
     }
+#endif
 
     if (!rb_override_ok)
     {
@@ -1287,7 +1294,7 @@ static void line_straight_detection()
         std::vector<cv::Point> points;
         int trans[2];
         int y_counter = 0;
-        for (int i = 0; i < t_pointsEdgeLeft_size && i < 0.7 / SAMPLE_DIST; i++, y_counter++)
+        for (int i = 0; i < t_pointsEdgeLeft_size && i < 0.6 / SAMPLE_DIST; i++, y_counter++)
         {
             s_general.Reverse_transf(trans[0], trans[1],
                                      t_pointsEdgeLeft[i].x, t_pointsEdgeLeft[i].y);
@@ -1302,7 +1309,7 @@ static void line_straight_detection()
             float m_ea = 0.0f;
             for (int i = 0; i < y_counter; i++)
                 m_ea += std::fabs(k_ * points[i].x + b_ - points[i].y);
-            if (m_ea < 50.f && t_pointsEdgeLeft_size > 30) is_left_straight = true;
+            if (m_ea < 65.f && t_pointsEdgeLeft_size > 30) is_left_straight = true;
             else if (m_ea > 200.f) is_left_curve = true;
         }
     }
@@ -1311,7 +1318,7 @@ static void line_straight_detection()
         std::vector<cv::Point> points;
         int trans[2];
         int y_counter = 0;
-        for (int i = 0; i < t_pointsEdgeRight_size && i < 0.7 / SAMPLE_DIST; i++, y_counter++)
+        for (int i = 0; i < t_pointsEdgeRight_size && i < 0.6 / SAMPLE_DIST; i++, y_counter++)
         {
             s_general.Reverse_transf(trans[0], trans[1],
                                      t_pointsEdgeRight[i].x, t_pointsEdgeRight[i].y);
@@ -1326,7 +1333,7 @@ static void line_straight_detection()
             float m_ea = 0.0f;
             for (int i = 0; i < y_counter; i++)
                 m_ea += std::fabs(k_ * points[i].x + b_ - points[i].y);
-            if (m_ea < 50.f && t_pointsEdgeRight_size > 30) is_right_straight = true;
+            if (m_ea < 65.0f && t_pointsEdgeRight_size > 30) is_right_straight = true;
             else if (m_ea > 200.f) is_right_curve = true;
         }
     }

@@ -1,5 +1,6 @@
 #ifndef VISION_HPP
 #define VISION_HPP
+#include "app_config.h"
 #include "zf_common_headfile.hpp"
 #include <opencv2/opencv.hpp>
 #include <ncnn/net.h>

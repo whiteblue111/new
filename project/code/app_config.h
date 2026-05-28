@@ -15,3 +15,12 @@
 #ifndef YAW_SPD_TUNE_MODE
 #define YAW_SPD_TUNE_MODE 0
 #endif
+
+/** 1=主循环 process_car_vision（红块裁切 + NCNN 6 类）；0=关闭 */
+#ifndef ENABLE_VISION_NCNN
+#define ENABLE_VISION_NCNN 0
+#endif
+/** 1=识别结果映射为中线绕行；0=仅识别/显示，不改巡线中线 */
+#ifndef ENABLE_VISION_BYPASS
+#define ENABLE_VISION_BYPASS 0
+#endif

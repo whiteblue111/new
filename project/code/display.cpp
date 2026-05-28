@@ -351,6 +351,7 @@ void display_show_track(void)
         g_display_mode != DISPLAY_MODE_TRACK_RING_PARAM) return;
     if (bin_img.empty() || bin_img.rows != ROI_H || bin_img.cols != COLSIMAGE) return;
 
+    const bool ring_param = (g_display_mode == DISPLAY_MODE_TRACK_RING_PARAM);
     const int src_cols = bin_img.cols;
 
     for (int dy = 0; dy < DISP_H; dy++)
@@ -364,9 +365,12 @@ void display_show_track(void)
             s_ips->draw_point((uint16)dx, (uint16)dy, color);
         }
     }
-    /* 迷宫边线：绿/蓝 = ROI 原图坐标 */
-    draw_edge_on_track(pointsEdgeLeft,  pointsEdgeLeft_size,  RGB565_GREEN);
-    draw_edge_on_track(pointsEdgeRight, pointsEdgeRight_size, RGB565_BLUE);
+    /* 迷宫边线：绿/蓝 = ROI 原图坐标（TRACK+RING 参数档不绘制，减少叠加） */
+    if (!ring_param)
+    {
+        draw_edge_on_track(pointsEdgeLeft,  pointsEdgeLeft_size,  RGB565_GREEN);
+        draw_edge_on_track(pointsEdgeRight, pointsEdgeRight_size, RGB565_BLUE);
+    }
 
     /* 阶段 C：俯视图边线（黄，直绘 t_pointsEdge，不做 Reverse_transf） */
     draw_edge_on_track(t_pointsEdgeLeft,  t_pointsEdgeLeft_size,  RGB565_YELLOW);
@@ -388,8 +392,8 @@ void display_show_track(void)
             draw_cross_on_track(rx, ry, RGB565_PURPLE);
     }
 
-    /* 俯视中线（红，直绘 t_CenterEdge，仅画点不连线） */
-    if (t_CenterEdge_size >= 1)
+    /* 俯视中线（红，直绘 t_CenterEdge，仅画点不连线；TRACK+RING 参数档不绘制） */
+    if (!ring_param && t_CenterEdge_size >= 1)
     {
         for (int i = 0; i < t_CenterEdge_size; i++)
         {
@@ -493,7 +497,9 @@ void display_show_debug_hud_phase_d(void)
  * @param 无 无
  * @return 无
  * @sample if (g_display_mode == DISPLAY_MODE_TRACK_RING_PARAM) display_show_debug_hud_ring_entry();
- * @note  仅在参数档叠加，布局在 y=236~284 的屏幕下方，便于实车观察进环子判据。
+ * @note  仅在参数档叠加；从 y=150 开始显示原始检测参数（带简短文本标签）：
+ *        LLF/LRF/tL/tR/iLS/iRS/Ly/Ry/LC/RC。
+ *        不显示 L_size_ok、L_straight_ok、L_y_ok、L_outer_ok 等 *_ok 子项。
  */
 void display_show_debug_hud_ring_entry(void)
 {
@@ -503,64 +509,46 @@ void display_show_debug_hud_ring_entry(void)
     RingEntryDebugSnapshot snap{};
     ring_debug_fill_entry(snap);
 
-    const int y0 = 236;
-    const int y1 = 252;
-    const int y2 = 268;
-    const int y3 = 284;
+    const int clear_y0 = 140;
+    const int clear_y1 = 199;
+    for (int y = clear_y0; y <= clear_y1; ++y)
+    {
+        for (int x = 0; x < DISP_W; ++x)
+        {
+            s_ips->draw_point((uint16)x, (uint16)y, RGB565_BLACK);
+        }
+    }
 
-    s_ips->show_string(0,   y0, "e:");
-    s_ips->show_int   (14,  y0, snap.eval_enabled, 1);
-    s_ips->show_string(28,  y0, "rg:");
-    s_ips->show_int   (50,  y0, snap.ring_flag, 1);
-    s_ips->show_string(64,  y0, "cd:");
-    s_ips->show_int   (88,  y0, snap.ring_cooldown, 3);
-    s_ips->show_string(122, y0, "cf:");
-    s_ips->show_int   (146, y0, snap.left_entry_confirm_cnt, 1);
-    s_ips->show_string(156, y0, "/");
-    s_ips->show_int   (164, y0, snap.right_entry_confirm_cnt, 1);
-    s_ips->show_string(178, y0, "LC:");
-    s_ips->show_int   (200, y0, snap.left_entry_cond, 1);
-    s_ips->show_string(212, y0, "RC:");
-    s_ips->show_int   (234, y0, snap.right_entry_cond, 1);
+    const int y0 = 150;
+    const int y1 = 166;
+    const int y2 = 182;
 
-    s_ips->show_string(0,   y1, "LL:");
-    s_ips->show_int   (22,  y1, snap.is_L_left_found, 1);
-    s_ips->show_string(34,  y1, "LR:");
-    s_ips->show_int   (56,  y1, snap.is_L_right_found, 1);
-    s_ips->show_string(68,  y1, "sL:");
-    s_ips->show_int   (90,  y1, snap.is_left_straight, 1);
-    s_ips->show_string(102, y1, "sR:");
-    s_ips->show_int   (124, y1, snap.is_right_straight, 1);
-    s_ips->show_string(142, y1, "tL:");
-    s_ips->show_int   (166, y1, snap.t_pointsEdgeLeft_size, 3);
-    s_ips->show_string(196, y1, "tR:");
-    s_ips->show_int   (220, y1, snap.t_pointsEdgeRight_size, 3);
+    s_ips->show_string(0,   y0, "LLF:");
+    s_ips->show_int   (28,  y0, snap.is_L_left_found, 1);
+    s_ips->show_string(46,  y0, "LRF:");
+    s_ips->show_int   (74,  y0, snap.is_L_right_found, 1);
+    s_ips->show_string(92,  y0, "tL:");
+    s_ips->show_int   (112, y0, snap.t_pointsEdgeLeft_size, 3);
+    s_ips->show_string(150, y0, "tR:");
+    s_ips->show_int   (170, y0, snap.t_pointsEdgeRight_size, 3);
 
-    s_ips->show_string(0,   y2, "Ly:");
-    s_ips->show_int   (22,  y2, snap.t_L_pointLeft_y, 3);
-    s_ips->show_string(54,  y2, "Ry:");
-    s_ips->show_int   (76,  y2, snap.t_L_pointRight_y, 3);
-    s_ips->show_string(108, y2, "Lc:");
-    s_ips->show_int   (130, y2, snap.L_single_corner_ok, 1);
-    s_ips->show_string(142, y2, "sz:");
-    s_ips->show_int   (164, y2, snap.L_size_ok, 1);
-    s_ips->show_string(176, y2, "st:");
-    s_ips->show_int   (198, y2, snap.L_straight_ok, 1);
-    s_ips->show_string(210, y2, "y:");
-    s_ips->show_int   (224, y2, snap.L_y_ok, 1);
+    s_ips->show_string(0,   y1, "iLS:");
+    s_ips->show_int   (28,  y1, snap.is_left_straight, 1);
+    s_ips->show_string(46,  y1, "iRS:");
+    s_ips->show_int   (74,  y1, snap.is_right_straight, 1);
+    s_ips->show_string(92,  y1, "Ly:");
+    s_ips->show_int   (112, y1, snap.t_L_pointLeft_y, 4);
+    s_ips->show_string(150, y1, "Ry:");
+    s_ips->show_int   (170, y1, snap.t_L_pointRight_y, 4);
 
-    s_ips->show_string(0,   y3, "Rc:");
-    s_ips->show_int   (22,  y3, snap.R_single_corner_ok, 1);
-    s_ips->show_string(34,  y3, "sz:");
-    s_ips->show_int   (56,  y3, snap.R_size_ok, 1);
-    s_ips->show_string(68,  y3, "st:");
-    s_ips->show_int   (90,  y3, snap.R_straight_ok, 1);
-    s_ips->show_string(102, y3, "y:");
-    s_ips->show_int   (116, y3, snap.R_y_ok, 1);
-    s_ips->show_string(124, y3, "o:");
-    s_ips->show_int   (136, y3, snap.R_outer_ok, 1);
-    s_ips->show_string(156, y3, "Lo:");
-    s_ips->show_int   (178, y3, snap.L_outer_ok, 1);
+    s_ips->show_string(0,   y2, "LC:");
+    s_ips->show_int   (24,  y2, snap.left_entry_cond, 1);
+    s_ips->show_string(50,  y2, "RC:");
+    s_ips->show_int   (74,  y2, snap.right_entry_cond, 1);
+    s_ips->show_string(100, y2, "Lb:");
+    s_ips->show_int   (124, y2, snap.L_break_ok, 1);
+    s_ips->show_string(150, y2, "Rb:");
+    s_ips->show_int   (174, y2, snap.R_break_ok, 1);
 }
 
 /**

@@ -17,7 +17,7 @@ void my_ncnn_env_test(void)
     try {
         std::cout << "========== NCNN 环境自检 ==========" << std::endl;
         ncnn::Net net;
-        net.opt.num_threads = 2; // 使用龙芯双核
+        net.opt.num_threads = 1; // LS2K0300 单核 LA264，单线程
 
         ncnn::Mat input(8, 8, 3);
         input.fill(1.0f); // 填充测试数据
@@ -50,7 +50,7 @@ void my_ncnn_photo_demo(void)
 
     // --- 2. 加载模型 ---
     ncnn::Net net;
-    net.opt.num_threads = 2; // 开启多线程加速
+    net.opt.num_threads = 1; // LS2K0300 单核 LA264，单线程
     
     if (net.load_param(model_param.c_str()) != 0) {
         std::cerr << "[错误] 找不到或无法解析 " << model_param << "!" << std::endl;

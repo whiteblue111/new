@@ -163,7 +163,7 @@ void Cross::Cross_Run(std::vector<POINT> &t_pointsEdgeLeft,
     else if (flag_cross == Cross_Out
         && t_pointsEdgeLeft_size  > 5
         && t_pointsEdgeRight_size > 5
-        && no_line_counter > 20)
+        && no_line_counter > 10)
     {
         no_line_counter = 0;
         flag_cross      = Cross_None;
@@ -240,8 +240,8 @@ void Cross::Cross_Run(std::vector<POINT> &t_pointsEdgeLeft,
 
 /**
  * @brief 远线巡线主流程
- * @note 通过 L 角点反变换到原图坐标，外推一个起点（x±18, y-5），
- *       自该点沿列向上找白→黑跳变 → 跑迷宫法巡新边线 →
+ * @note 通过 L 角点反变换到原图坐标；近端全白判据为 ROI 底 5 行、x 去掉左右各 3 列后全宽采样，左右共用 below_all_white。
+ *       外推起点（x±15, y=128 或 y-5），自该点沿列向上找白→黑跳变 → 跑迷宫法巡新边线 →
  *       perspective + blur + resample + angle + NMS → find_corners
  */
 void Cross::cross_find_farline(cv::Mat &img,
@@ -267,6 +267,20 @@ void Cross::cross_find_farline(cv::Mat &img,
     far_t_L_pointLeft_id  = 0;
     far_t_L_pointRight_id = 0;
 
+    bool below_all_white = true;
+    if (!img.empty() && img.cols >= COLSIMAGE && img.rows >= ROI_H) {
+        for (int cy = ROI_H - 5; cy < ROI_H; ++cy) {
+            const unsigned char *row = img.ptr<unsigned char>(cy);
+            for (int x = 3; x < COLSIMAGE - 3; ++x) {
+                if (row[x] < 128) {
+                    below_all_white = false;
+                    break;
+                }
+            }
+            if (!below_all_white) break;
+        }
+    }
+
     if (is_L_left_found
         && t_L_pointLeft_id >= 0
         && t_L_pointLeft_id < (int)t_pointsEdgeLeft.size())
@@ -274,20 +288,9 @@ void Cross::cross_find_farline(cv::Mat &img,
         general.Reverse_transf(far_left_x0, far_left_y0,
                                t_pointsEdgeLeft[t_L_pointLeft_id].x,
                                t_pointsEdgeLeft[t_L_pointLeft_id].y);
-        bool left_below_all_white = true;
-        for (int i = 1; i <= 5; i++)
-        {
-            int cy = far_left_y0 + i;
-            if (cy < 0 || cy >= ROI_H
-                || far_left_x0 < 0 || far_left_x0 >= COLSIMAGE
-                || img.at<unsigned char>(cy, far_left_x0) < 128)
-            {
-                left_below_all_white = false;
-                break;
-            }
-        }
-        far_left_y0 -= 10;
-        far_left_x0 -= left_below_all_white ? 15 : 3;
+
+        far_left_y0 = below_all_white ? 128 : far_left_y0 - 5;
+        far_left_x0 -= below_all_white ? 15 : 0;
         L_left_found = true;
     }
     if (is_L_right_found
@@ -297,20 +300,8 @@ void Cross::cross_find_farline(cv::Mat &img,
         general.Reverse_transf(far_right_x0, far_right_y0,
                                t_pointsEdgeRight[t_L_pointRight_id].x,
                                t_pointsEdgeRight[t_L_pointRight_id].y);
-        bool below_all_white = true;
-        for (int i = 1; i <= 5; i++)
-        {
-            int cy = far_right_y0 + i;
-            if (cy < 0 || cy >= ROI_H
-                || far_right_x0 < 0 || far_right_x0 >= COLSIMAGE
-                || img.at<unsigned char>(cy, far_right_x0) < 128)
-            {
-                below_all_white = false;
-                break;
-            }
-        }
-        far_right_y0 -= 10;
-        far_right_x0 += below_all_white ? 15 : 3;
+        far_right_y0 = below_all_white ? 128 : far_right_y0 - 5;
+        far_right_x0 += below_all_white ? 15 : 0;
         L_right_found = true;
     }
     if (far_left_x0  < 0 || far_left_x0  >= COLSIMAGE

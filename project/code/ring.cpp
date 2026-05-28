@@ -26,8 +26,8 @@ static bool ring_outer_edge_stable(const std::vector<POINT> &edge, int size)
         return false;
     const int i2 = size * 2 / 3;
     const int i3 = size / 3;
-    return std::abs(edge[size - 1].x - edge[i2].x) < 20
-        && std::abs(edge[i3].x - edge[0].x) < 20;
+    return std::abs(edge[size - 1].x - edge[i2].x) < 30
+        && std::abs(edge[i3].x - edge[0].x) < 30;
 }
 
 /** 最近一帧进环判据快照（供 display HUD 读取） */
@@ -60,6 +60,11 @@ void Ring::reset()
     left_edge_phase    = EDGE_OK;
     left_entry_confirm_count  = 0;
     right_entry_confirm_count = 0;
+
+    ring_break_left  = false;
+    ring_break_right = false;
+    ring_break_y_top[0] = -1; ring_break_y_top[1] = -1;
+    ring_break_y_bot[0] = -1; ring_break_y_bot[1] = -1;
 }
 
 
@@ -82,6 +87,238 @@ void Ring::update_edge_regain(int size, int &regain_count, int &phase)
 
 
 /**
+ * @brief 原图行扫描：每行从 x=160 向两侧找首个白→黑跳变点
+ * @param img  ROI 二值图（CV_8UC1，COLSIMAGE×ROI_H = 320×130，相机视角）
+ * @return 无
+ * @sample ring.ring_findline(bin_img);
+ * @note  写入 ring_left_x[ROI_H] / ring_right_x[ROI_H] / ring_findline_valid[ROI_H]。
+ *        遍历 y=ROI_H-1→0（近→远）；中心 (y,160) 连续 RING_FINDLINE_CENTER_BLACK_STOP 行黑则早停。
+ *        未扫描远端行保持 valid=false 与哨兵 3/318。单行中心黑亦 valid=false。
+ *        到边界仍未找到跳变点记 3/318 且 valid=true。
+ */
+void Ring::ring_findline(const cv::Mat &img)
+{
+    const int CX    = RING_FINDLINE_CENTER_X;          /* 160 */
+    const int L_END = RING_EDGE_BAND - 2;              /* 3 */
+    const int R_END = COLSIMAGE - 1 - (RING_EDGE_BAND - 2); /* 318 */
+    const int THRES = RING_FINDLINE_THRES;
+
+    for (int y = 0; y < ROI_H; ++y)
+    {
+        ring_left_x[y]         = L_END;
+        ring_right_x[y]        = R_END;
+        ring_findline_valid[y] = false;
+    }
+
+    if (img.empty() || img.cols < COLSIMAGE || img.rows < ROI_H)
+        return;
+
+    int black_streak = 0;
+
+    for (int y = ROI_H - 1; y >= 0; --y)
+    {
+        const unsigned char *row = img.ptr<unsigned char>(y);
+
+        if (row[CX] < THRES)
+        {
+            if (++black_streak >= RING_FINDLINE_CENTER_BLACK_STOP)
+                break;
+            continue;
+        }
+
+        black_streak = 0;
+
+        int lx = L_END;
+        for (int x = CX; x > L_END; --x)
+        {
+            if (row[x] >= THRES && row[x - 1] < THRES)
+            {
+                lx = x;
+                break;
+            }
+        }
+        ring_left_x[y] = lx;
+
+        int rx = R_END;
+        for (int x = CX; x < R_END; ++x)
+        {
+            if (row[x] >= THRES && row[x + 1] < THRES)
+            {
+                rx = x;
+                break;
+            }
+        }
+        ring_right_x[y] = rx;
+
+        ring_findline_valid[y] = true;
+    }
+}
+
+
+/**
+ * @brief 断线-缺口-断线 形态匹配（环岛进环辅助判据）- 贪婪匹配改良版
+ * @param side  0=左，1=右
+ * @param[out] y_bot  命中时填断线模式下沿 y（未命中保持 -1）
+ * @param[out] y_top  命中时填断线模式上沿 y（未命中保持 -1）
+ * @return true=命中（正常>=5行 -> 断线>=5行 -> 正常>=5行 模式）
+ * @note  3 段状态机：inside(>=N) → at_edge(>=N) → inside(>=N)，N=RING_BREAK_RUN_LEN=5 行。
+ * 改良逻辑：不会在刚好等于5行时盲目跳跃，而是无限吃进当前状态行，直到遇到【真实状态切换】且【累计已达标】时，才进入下一阶段。
+ * 容忍 RING_BREAK_BAD_TOL=3 行异常（噪点不会打断累积）。
+ */
+bool Ring::ring_breakline_check(int side, int &y_bot, int &y_top)
+{
+    y_bot = -1;
+    y_top = -1;
+    if (side != 0 && side != 1) return false;
+
+    // 获取对应侧的边界数组
+    const int *arr = (side == 0) ? ring_left_x : ring_right_x;
+
+    // 阈值常量定义
+    const int EDGE      = RING_EDGE_BAND;                              /* 5：判断为断线的阈值 */
+    const int INSIDE_TH = RING_EDGE_BAND + RING_INSIDE_GAP;            /* 10：判断为正常线（赛道内）的阈值 */
+    const int RUN       = RING_BREAK_RUN_LEN;                          /* 5：每个阶段要求的最低达标行数 */
+    const int BAD_TOL   = RING_BREAK_BAD_TOL;                          /* 3：容忍的连续坏点行数 */
+    const int Y_TOP     = RING_BREAK_SCAN_Y_TOP;                       /* 10：扫描的最远行界限 */
+
+    // 状态机定义
+    enum { S_INSIDE_BOT = 0, S_EDGE = 1, S_INSIDE_TOP = 2 };
+    int state = S_INSIDE_BOT;
+    int good = 0, bad = 0; // good:符合当前状态的有效行数，bad:不符合的异常行数
+
+    // 记录各段的起止Y坐标（辅助变量，用于最终返回）
+    int seg_bot_y = -1; 
+    int seg_edge_bot_y = -1, seg_edge_top_y = -1;
+    int seg_inside_top_top_y = -1; 
+
+    // 从下往上（从近到远）扫描
+    for (int y = ROI_H - 1; y >= Y_TOP; --y)
+    {
+        int x = arr[y];
+        bool valid = ring_findline_valid[y]; // 该行是否成功扫到线（未被黑块早停）
+
+        bool is_inside; // 标志位：是否为正常赛道线
+        bool is_edge;   // 标志位：是否为断线/丢线
+        
+        if (side == 0) // 左边线
+        {
+            is_inside = valid && (x > INSIDE_TH);            /* 左侧正常：x > 10 */
+            is_edge   = valid && (x <= EDGE);                /* 左侧断线：x <= 5 */
+        }
+        else // 右边线
+        {
+            is_inside = valid && (x < COLSIMAGE - 1 - INSIDE_TH); /* 右侧正常：x < 309 */
+            is_edge   = valid && (x >= COLSIMAGE - 1 - EDGE);     /* 右侧断线：x >= 314 */
+        }
+
+        switch (state)
+        {
+            case S_INSIDE_BOT: // 【阶段一：底部正常赛道】
+                if (is_inside)
+                {
+                    if (good == 0) seg_bot_y = y; // 记录最底端起始Y
+                    good++;  // 贪婪匹配：只要是正常线就无限累加，无论是5行还是20行
+                    bad = 0; // 清零坏点计数
+                }
+                else if (is_edge && good >= RUN)
+                {
+                    // 核心跨越逻辑：已经攒够了>=5行正常，且【真正遇到了断线】
+                    state = S_EDGE; // 跳入阶段二
+                    seg_edge_bot_y = y; // 记录断线下沿
+                    seg_edge_top_y = y;
+                    good = 1; // 当前这行就是阶段二的第1个有效行
+                    bad = 0;
+                }
+                else
+                {
+                    // 未攒够5行就断了，或者遇到不属于正常也不属于断线的过渡杂区
+                    bad++;
+                    if (bad > BAD_TOL) // 超过容忍极限，彻底推翻重来
+                    {
+                        good = 0; bad = 0;
+                        seg_bot_y = -1;
+                    }
+                }
+                break;
+
+            case S_EDGE: // 【阶段二：中间断线缺口】
+                if (is_edge)
+                {
+                    seg_edge_top_y = y; // 持续更新断线的上沿
+                    good++; // 贪婪匹配：只要是断线就无限累加
+                    bad = 0;
+                }
+                else if (is_inside && good >= RUN)
+                {
+                    // 核心跨越逻辑：已经攒够了>=5行断线，且【真正再次遇到了正常线】
+                    state = S_INSIDE_TOP; // 跳入阶段三
+                    seg_inside_top_top_y = y;
+                    good = 1;
+                    bad = 0;
+                }
+                else
+                {
+                    bad++;
+                    if (bad > BAD_TOL) 
+                    {
+                        // 发现是假缺口（断线后没接上正常赛道），状态机崩溃，退回阶段一
+                        state = S_INSIDE_BOT;
+                        good = 0; bad = 0;
+                        seg_bot_y = -1;
+                        seg_edge_bot_y = -1;
+                        seg_edge_top_y = -1;
+                        
+                        // 容错：如果当前行恰好是正常线，直接作为阶段一的起点
+                        if (is_inside)
+                        {
+                            seg_bot_y = y;
+                            good = 1;
+                        }
+                    }
+                }
+                break;
+
+            case S_INSIDE_TOP: // 【阶段三：顶部正常赛道】
+                if (is_inside)
+                {
+                    seg_inside_top_top_y = y; 
+                    good++;
+                    bad = 0;
+                    // 对于最后一段，一旦达标>=5行，就证明整个“夹心饼干”形态完整，直接判定成功
+                    if (good >= RUN)
+                    {
+                        y_bot = seg_edge_bot_y; // 导出断线的下沿
+                        y_top = seg_edge_top_y; // 导出断线的上沿
+                        return true; // 命中环岛特征！
+                    }
+                }
+                else
+                {
+                    bad++;
+                    if (bad > BAD_TOL) // 顶部正常线不够5行就消失了，退回最初状态
+                    {
+                        state = S_INSIDE_BOT;
+                        good = 0; bad = 0;
+                        seg_bot_y = -1;
+                        seg_edge_bot_y = -1;
+                        seg_edge_top_y = -1;
+                        seg_inside_top_top_y = -1;
+                    }
+                }
+                break;
+        }
+    }
+
+    // 压制编译器针对未使用变量的警告
+    (void)seg_bot_y;
+    (void)seg_inside_top_top_y;
+    
+    // 扫描完整个ROI也没能完整匹配三个阶段，返回失败
+    return false;
+}
+
+
+/**
  * @brief 环岛识别（状态机迁移，迷宫俯视图边线 + L 角点）
  * @param imgBinary              二值图（CV_8UC1，ROI 320x130）
  * @param is_left_straight       左侧是否直道
@@ -98,7 +335,7 @@ void Ring::update_edge_regain(int size, int &regain_count, int &phase)
  * @sample ring.Ring_Check(bin_img, is_left_straight, is_right_straight, tl, tr, ll, lr, pL, pR, eL, eR);
  * @note  当 flag_ring==Ring_None 时会同步缓存进环条件快照，供屏显调试读取。
  */
-void Ring::Ring_Check(cv::Mat & /*imgBinary*/,
+void Ring::Ring_Check(cv::Mat &imgBinary,
                       bool is_left_straight, bool is_right_straight,
                       int t_pointsEdgeLeft_size, int t_pointsEdgeRight_size,
                       bool is_L_left_found, bool is_L_right_found,
@@ -138,6 +375,15 @@ void Ring::Ring_Check(cv::Mat & /*imgBinary*/,
 
         snap.eval_enabled = 1;
 
+        /* 行扫描 + 断线模式：辅助进环判据（与 L 角点/边线点数/直道 AND） */
+        ring_findline(imgBinary);
+        int yb_l = -1, yt_l = -1;
+        int yb_r = -1, yt_r = -1;
+        ring_break_left  = ring_breakline_check(0, yb_l, yt_l);
+        ring_break_right = ring_breakline_check(1, yb_r, yt_r);
+        ring_break_y_bot[0] = yb_l; ring_break_y_top[0] = yt_l;
+        ring_break_y_bot[1] = yb_r; ring_break_y_top[1] = yt_r;
+
         const bool left_single_corner_ok = is_L_left_found && !is_L_right_found;
         const bool right_single_corner_ok = is_L_right_found && !is_L_left_found;
         const bool left_size_ok = t_pointsEdgeLeft_size < L_SMALL
@@ -146,21 +392,21 @@ void Ring::Ring_Check(cv::Mat & /*imgBinary*/,
                                 && t_pointsEdgeLeft_size > R_LARGE;
         const bool left_straight_ok = is_right_straight && !is_left_straight;
         const bool right_straight_ok = is_left_straight && !is_right_straight;
-        const bool left_y_ok = t_L_pointLeft.y < 100 && t_L_pointLeft.y > 30;
-        const bool right_y_ok = t_L_pointRight.y < 100 && t_L_pointRight.y > 30;
-        const bool left_outer_ok = ring_outer_edge_stable(t_pointsEdgeRight, t_pointsEdgeRight_size);
-        const bool right_outer_ok = ring_outer_edge_stable(t_pointsEdgeLeft, t_pointsEdgeLeft_size);
+        const bool left_y_ok = t_L_pointLeft.y < 110 && t_L_pointLeft.y > 20;
+        const bool right_y_ok = t_L_pointRight.y < 110 && t_L_pointRight.y > 20;
 
         const bool left_entry_cond = left_single_corner_ok
                                   && left_size_ok
                                   && left_straight_ok
                                   && left_y_ok
-                                  && left_outer_ok;
+                                  && ring_break_left
+                                  && !ring_break_right;
         const bool right_entry_cond = right_single_corner_ok
                                    && right_size_ok
                                    && right_straight_ok
                                    && right_y_ok
-                                   && right_outer_ok;
+                                   && ring_break_right
+                                   && !ring_break_left;
 
         snap.L_single_corner_ok = left_single_corner_ok ? 1 : 0;
         snap.R_single_corner_ok = right_single_corner_ok ? 1 : 0;
@@ -170,8 +416,8 @@ void Ring::Ring_Check(cv::Mat & /*imgBinary*/,
         snap.R_straight_ok = right_straight_ok ? 1 : 0;
         snap.L_y_ok = left_y_ok ? 1 : 0;
         snap.R_y_ok = right_y_ok ? 1 : 0;
-        snap.L_outer_ok = left_outer_ok ? 1 : 0;
-        snap.R_outer_ok = right_outer_ok ? 1 : 0;
+        snap.L_break_ok = ring_break_left ? 1 : 0;
+        snap.R_break_ok = ring_break_right ? 1 : 0;
         snap.left_entry_cond = left_entry_cond ? 1 : 0;
         snap.right_entry_cond = right_entry_cond ? 1 : 0;
 

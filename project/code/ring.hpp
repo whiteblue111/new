@@ -49,13 +49,14 @@ struct RingEntryDebugSnapshot
     int R_straight_ok           = 0;  /**< is_left_straight && !is_right_straight */
     int L_y_ok                  = 0;  /**< t_L_pointLeft.y in (30,100) */
     int R_y_ok                  = 0;  /**< t_L_pointRight.y in (30,100) */
-    int L_outer_ok              = 0;  /**< ring_outer_edge_stable(t_pointsEdgeRight, size) */
-    int R_outer_ok              = 0;  /**< ring_outer_edge_stable(t_pointsEdgeLeft, size) */
 
     int left_entry_cond         = 0;
     int right_entry_cond        = 0;
     int left_entry_confirm_cnt  = 0;
     int right_entry_confirm_cnt = 0;
+
+    int L_break_ok              = 0;  /**< ring_breakline_check 左侧命中（5-5-5 形态） */
+    int R_break_ok              = 0;  /**< ring_breakline_check 右侧命中（5-5-5 形态） */
 };
 
 /**
@@ -103,6 +104,16 @@ public:
     static const int R_LARGE           = 100;
     static const int RING_COOLDOWN_MAX         = 150;
     static const int RING_ENTRY_CONFIRM_FRAMES = 3;
+
+    /** ring_findline / ring_breakline_check 标定参数 */
+    static const int RING_FINDLINE_CENTER_X  = 160; /**< 行扫描中心起点（COLSIMAGE/2） */
+    static const int RING_FINDLINE_THRES     = 128; /**< 二值阈值（与 OTSU 一致） */
+    static const int RING_FINDLINE_CENTER_BLACK_STOP = 2; /**< 中心连续黑行数达到则停止向远端扫描 */
+    static const int RING_EDGE_BAND          = 3;   /**< 贴边判定：左<=5 / 右>=314 */
+    static const int RING_INSIDE_GAP         = 5;   /**< inside 与 edge 之间的安全间隙，左:x>10 右:x<309 */
+    static const int RING_BREAK_RUN_LEN      = 3;   /**< 每段最少连续行数 */
+    static const int RING_BREAK_BAD_TOL      = 5;   /**< 每段允许的异常行数 */
+    static const int RING_BREAK_SCAN_Y_TOP   = 5;  /**< 扫描 y 上界（远端透视压缩区不参与） */
 
     Ring();
 
@@ -195,6 +206,16 @@ public:
     int  left_entry_confirm_count  = 0;
     int  right_entry_confirm_count = 0;
 
+    /** 行扫描结果与断线模式检测输出（最近一帧 Ring_None 调用刷新） */
+    int  ring_left_x[ROI_H]        = {0};
+    int  ring_right_x[ROI_H]       = {0};
+    bool ring_findline_valid[ROI_H] = {false};
+    bool ring_break_left           = false;
+    bool ring_break_right          = false;
+    /** [0]=左 [1]=右，断线模式上/下沿 y（命中时有效，未命中为 -1） */
+    int  ring_break_y_top[2]       = {-1, -1};
+    int  ring_break_y_bot[2]       = {-1, -1};
+
     int block_size = 9;
     int clip_value = 3;
     double pixel_per_meter = 88.88;
@@ -204,6 +225,32 @@ public:
     const int dir_front[4][2]      = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
     const int dir_frontleft[4][2]  = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
     const int dir_frontright[4][2] = {{1, -1}, {1, 1}, {-1, 1}, {-1, -1}};
+
+    /**
+     * @brief 原图行扫描：每行从 x=160 向两侧找首个白→黑跳变点
+     * @param img  ROI 二值图（CV_8UC1，COLSIMAGE×ROI_H = 320×130，相机视角）
+     * @return 无
+     * @sample ring.ring_findline(bin_img);
+     * @note  写入 ring_left_x[ROI_H] / ring_right_x[ROI_H] / ring_findline_valid[ROI_H]。
+     *        遍历 y=ROI_H-1→0（近→远）；中心 (y,160) 连续 RING_FINDLINE_CENTER_BLACK_STOP 行黑则早停。
+     *        未扫描的远端行保持 valid=false 与哨兵 3/318。单行中心黑亦 valid=false。
+     *        到边界仍未找到跳变点记 3/318 且 valid=true。用 img.ptr<uchar>(y) 行指针访问。
+     */
+    void ring_findline(const cv::Mat &img);
+
+    /**
+     * @brief 断线-缺口-断线 形态匹配（环岛进环辅助判据）
+     * @param side  0=左，1=右
+     * @param[out] y_bot  命中时填断线模式下沿 y（未命中保持 -1）
+     * @param[out] y_top  命中时填断线模式上沿 y（未命中保持 -1）
+     * @return true=命中（5-5-5 模式）
+     * @sample int yb=-1, yt=-1; bool ok = ring.ring_breakline_check(0, yb, yt);
+     * @note  调用前需先执行 ring_findline。3 段状态机：
+     *        inside(N) → at_edge(N) → inside(N)，每段长度 RING_BREAK_RUN_LEN=5
+     *        且容忍 RING_BREAK_BAD_TOL=1 行异常。扫描方向：y=ROI_H-1 → RING_BREAK_SCAN_Y_TOP=40。
+     *        左侧 inside=x>10 / at_edge=x<=5；右侧 inside=x<309 / at_edge=x>=314。
+     */
+    bool ring_breakline_check(int side, int &y_bot, int &y_top);
 
     void findline_lefthand_adaptive(cv::Mat &img, int block_size, int clip_value,
                                     int x, int y,

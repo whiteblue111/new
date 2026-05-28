@@ -67,8 +67,7 @@ private:
         int b = bgr[0];
         int g = bgr[1];
         int r = bgr[2];
-        
-        // 经验阈值：剔除暗礁噪点，且 R 通道必须显著大于 G 和 B
+
         return (r > 80) && ((r - g) > 40) && ((r - b) > 40);
     }
 

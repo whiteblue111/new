@@ -45,6 +45,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/libraries/zf_driver/zf_driver_tcp_client.cpp.o.d"
   "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/libraries/zf_driver/zf_driver_udp.cpp.o"
   "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/libraries/zf_driver/zf_driver_udp.cpp.o.d"
+  "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/banmaxian.cpp.o"
+  "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/banmaxian.cpp.o.d"
   "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/cross.cpp.o"
   "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/cross.cpp.o.d"
   "CMakeFiles/project.dir/home/lq/LS2K0300_Library/LS2K300_Library/Seekfree_LS2K0300_Opensource_Library/project/code/display.cpp.o"
