@@ -1,6 +1,7 @@
 #include "motor.hpp"  
 #include "pid.hpp"  
 #include "imu0.hpp"  
+#include "perf_stats.hpp"
 #include "zf_common_headfile.hpp"  
 #include <fstream>
 #include <string>
@@ -18,11 +19,6 @@ static struct pwm_info drv8701e_pwm_2_info;
   
 static zf_driver_encoder encoder_quad_1(ENCODER_QUAD_1_PATH); // 左  
 static zf_driver_encoder encoder_quad_2(ENCODER_QUAD_2_PATH); // 右  
-  
-extern volatile uint32_t g_speed_loop_cnt;  
-
-
-  
 /* ====================== 全局状态定义 ====================== */  
 motor_param_t motor_l,motor_r;  
 float loss_pass = 0.4;//编码器低通滤波系数  
@@ -53,7 +49,7 @@ PID_Inc_Datatypedef pid_speed_l = PID_INC_INIT(1000.00f, 10.00f, 0.0f);  //5.00 
 PID_Inc_Datatypedef pid_speed_r = PID_INC_INIT(1000.00f, 10.00f, 0.0f); 
 // PID_Pos_Datatypedef pid_dir     = PID_POS_INIT(0.0f, 0.0f,  0.0f, 0.0f);  
 PID_Pos_Datatypedef pid_yaw_spd = PID_POS_INIT(0.012f, 0.0f, 0.00f, 0.0f);   //角速度环位置式PD，P=0.015 I=0 D=0.006
-PD_Double  pd_yaw               = PD_DOUBLE_INIT(5.2f, 1.5f, 2.0f, 0.00f); //双pd角度环 5.0 1.0 0.5 0.002
+PD_Double  pd_yaw               = PD_DOUBLE_INIT(5.2f, 1.5f, 1.0f, 0.00f); //双pd角度环 5.0 1.0 0.5 0.002
 /* ====================== 增量式速度环内部累计占空比 ====================== */  
 static float duty_l_out = 0.0f;  
 static float duty_r_out = 0.0f;  
@@ -234,6 +230,7 @@ void speed_reset()
  */
 void pit_callback_speed(void)
 {
+    perf_stats_tick_speed_loop();
     speed_cascaded_5ms();
 }
 
@@ -243,6 +240,7 @@ void pit_callback_speed(void)
  */
 void pit_callback_yaw_spd(void)
 {
+    perf_stats_tick_yaw_spd_loop();
     yaw_spd_loop();
 }
 
@@ -252,6 +250,7 @@ void pit_callback_yaw_spd(void)
  */
 void pit_callback_yaw(void)
 {
+    perf_stats_tick_yaw_loop();
     yaw_loop();
 }
   

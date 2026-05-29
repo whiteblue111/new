@@ -139,6 +139,51 @@ void track_elements_reset(void);
  */
 float Image_Error_Get(void);
 
+/**
+ * @brief 预分配巡线点集 vector 容量（启动时调用一次）
+ * @return 无
+ * @sample image_track_buffers_init();
+ */
+void image_track_buffers_init(void);
+
+/**
+ * @brief 将俯视 t_CenterEdge 反透视写入 CenterEdge（TCP/屏显前按需调用）
+ * @return 无
+ * @sample image_sync_center_edge_roi();
+ */
+void image_sync_center_edge_roi(void);
+
+
+/* ====================== 迷宫行边界（仅 NCNN 视觉） ====================== */
+
+/** 行边界左右留白（列），供 track_row_bounds_xrange 使用 */
+constexpr int TRACK_BOUND_MARGIN = 3;
+
+/**
+ * @brief 迷宫巡线后由 pointsEdgeLeft/Right 重建每行左右边界
+ * @return 无
+ * @note  在 trackRecognition 迷宫法之后调用；短边缺行补 0 / COLSIMAGE-1
+ * @note  仅 NCNN 视觉模块使用，红砖避障勿调用
+ */
+void track_build_row_bounds_from_maze(void);
+
+/**
+ * @brief 本帧行边界是否可用于约束视觉
+ * @return true 表示有效行数达到阈值，vision 应使用 track_row_bounds_xrange
+ * @note  仅 NCNN 视觉模块使用，红砖避障勿调用
+ */
+bool track_row_bounds_enabled(void);
+
+/**
+ * @brief 查询指定 ROI 行的允许列范围（已含 TRACK_BOUND_MARGIN）
+ * @param y     ROI 局部行号 [0, ROI_H)
+ * @param x_lo  [out] 含左端列号
+ * @param x_hi  [out] 不含右端列号（与 OpenCV 列循环上界一致）
+ * @return      该行边界有效为 true
+ * @note  仅 NCNN 视觉模块使用，红砖避障勿调用
+ */
+bool track_row_bounds_xrange(int y, int &x_lo, int &x_hi);
+
 
 /* ====================== 阶段 C 调试（透视边线 + L 角点） ====================== */
 

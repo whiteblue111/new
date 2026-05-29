@@ -72,7 +72,6 @@ typedef struct motor_param_t {
 } motor_param_t;
 extern motor_param_t motor_l,motor_r;
 static int32_t apply_smooth_deadzone(int32_t duty, int32_t deadzone, float ramp_width);
-extern volatile uint32_t g_speed_loop_cnt;  
 void speed_cascaded_5ms();  
 void yaw_loop();  
 void yaw_spd_loop();

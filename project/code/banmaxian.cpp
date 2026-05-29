@@ -160,6 +160,16 @@ void banmaxian_check(const cv::Mat &bin_img, int cross_flag)
 
 
 /**
+ * @brief 斑马线模块是否已被 Cross_Begin 解锁
+ * @return true 已解锁
+ */
+bool banmaxian_is_armed(void)
+{
+    return s_armed;
+}
+
+
+/**
  * @brief 填充斑马线模块调试快照
  * @param out 输出快照结构体
  * @return 无

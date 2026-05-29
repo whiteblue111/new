@@ -51,6 +51,9 @@ constexpr int VISION_BYPASS_SHIFT_PX = 5;
 /** model_roi_cut 连续失败超过该帧数后清零视觉绕行动作 */
 constexpr int VISION_LOST_FRAMES     = 10;
 
+/** 连续 3 帧确认同一类别后，NCNN 推理冷却时长（毫秒） */
+constexpr int VISION_INFER_COOLDOWN_MS = 5000;
+
 /* ====================== 视觉状态缓存（供 display_show_vision 读取） ====================== */
 extern cv::Mat g_last_roi;          /* 最近一次 model_roi_cut 成功输出的 64×64 BGR */
 extern cv::Mat g_last_saved_roi;    /* KEY_3 最近一次保存成功的 64×64 ROI 深拷贝 */
@@ -94,9 +97,17 @@ public:
     // 核心函数：红块 4 角定位 + 透视梯形裁切 → 64×64 ROI
     bool model_roi_cut(cv::Mat& img, cv::Mat& roi, bool is_draw = true);
 
+    /**
+     * @brief 轻量红块预检：底部行扫描，无 BFS/透视
+     * @param img [in] BGR 裁剪图（通常 320×130）
+     * @return true 可能存在红块，可进入 model_roi_cut；false 跳过裁切与 NCNN
+     * @note  判定条件与 find_red_block 第 1 步一致；最终以 model_roi_cut 为准
+     */
+    bool probe_red_hint(const cv::Mat& img) const;
+
 private:
     // 直接在 BGR 色彩空间下判断红色 (极速版)
-    inline bool is_red_bgr(const cv::Vec3b& bgr) {
+    inline bool is_red_bgr(const cv::Vec3b& bgr) const {
         int b = bgr[0];
         int g = bgr[1];
         int r = bgr[2];

@@ -1,4 +1,5 @@
 #include "app_config.h"
+#include "image.hpp"
 #include "vision.hpp"
 #include <iostream>
 #include <vector>
@@ -35,6 +36,44 @@ static int s_no_roi_frames = 0;
 static int s_confirmed_index = -2; /* 已生效的"官方结果"，-2 表示未初始化 */
 static int s_candidate_index = -2; /* 当前考察期的"候选结果" */
 static int s_consecutive_cnt = 0;  /* 候选结果连续出现帧数 */
+
+/* NCNN 推理冷却截止时间（毫秒时间戳）；0 表示未在冷却 */
+static long long s_infer_cooldown_until_ms = 0;
+
+/**
+ * @brief 获取当前单调毫秒时间戳
+ * @return 自 epoch 起的毫秒数
+ * @sample const long long now = vision_now_ms();
+ */
+static long long vision_now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    return (long long)tv.tv_sec * 1000LL + (long long)tv.tv_usec / 1000LL;
+}
+
+/**
+ * @brief 判断 NCNN 推理是否处于冷却期
+ * @return true 表示冷却中，应跳过 ex.input/extract；false 表示可推理
+ * @sample if (vision_infer_in_cooldown()) return;
+ */
+static bool vision_infer_in_cooldown(void)
+{
+    return s_infer_cooldown_until_ms > 0 && vision_now_ms() < s_infer_cooldown_until_ms;
+}
+
+/**
+ * @brief 启动 NCNN 推理冷却（连续 3 帧确认后调用）
+ * @return 无
+ * @sample vision_infer_start_cooldown();
+ * @note  冷却期间仍执行 probe_red_hint 与 model_roi_cut，仅跳过 NCNN
+ */
+static void vision_infer_start_cooldown(void)
+{
+    s_infer_cooldown_until_ms = vision_now_ms() + VISION_INFER_COOLDOWN_MS;
+    std::cout << "[智能视觉] 推理冷却 "
+              << (VISION_INFER_COOLDOWN_MS / 1000) << "s" << std::endl;
+}
 
 /**
  * @brief 把 NCNN 6 类标签索引映射为中线偏移动作
@@ -87,6 +126,71 @@ static const std::vector<std::string> kVisionLabels = {
  */
 const std::vector<std::string>& vision_labels(void) { return kVisionLabels; }
 
+static constexpr int VISION_SCAN_FALLBACK_X = 45;
+
+/**
+ * @brief 取指定行的红块扫描列范围
+ * @param img   BGR ROI
+ * @param y     行号
+ * @param x_lo  [out] 含左端列
+ * @param x_hi  [out] 不含右端列
+ * @return 无
+ * @note  边界无效时回退 45 .. cols-45
+ */
+static void vision_row_scan_xrange(const Mat &img, int y, int &x_lo, int &x_hi)
+{
+    if (track_row_bounds_enabled() && track_row_bounds_xrange(y, x_lo, x_hi))
+        return;
+    x_lo = VISION_SCAN_FALLBACK_X;
+    x_hi = img.cols - VISION_SCAN_FALLBACK_X;
+    if (x_hi <= x_lo)
+    {
+        x_lo = 0;
+        x_hi = img.cols;
+    }
+}
+
+/**
+ * @brief 判断像素是否落在当行赛道边界内
+ * @param img BGR ROI
+ * @param x   列号
+ * @param y   行号
+ * @return true 在允许范围内或边界未启用时的回退范围内
+ */
+static bool vision_point_in_row_bounds(const Mat &img, int x, int y)
+{
+    int x_lo = 0;
+    int x_hi = 0;
+    vision_row_scan_xrange(img, y, x_lo, x_hi);
+    return x >= x_lo && x < x_hi;
+}
+
+/**
+ * @brief 检查四边形四角是否均在各行赛道边界内
+ * @param img  BGR ROI
+ * @param quad 4 角点
+ * @return true 全部在界内或边界未启用
+ */
+static bool vision_quad_within_track_bounds(const Mat &img, const Point2f quad[4])
+{
+    if (!track_row_bounds_enabled())
+        return true;
+    for (int i = 0; i < 4; i++)
+    {
+        const int y = (int)(quad[i].y + 0.5f);
+        const int x = (int)(quad[i].x + 0.5f);
+        if (y < 0 || y >= img.rows)
+            return false;
+        int x_lo = 0;
+        int x_hi = 0;
+        if (!track_row_bounds_xrange(y, x_lo, x_hi))
+            return false;
+        if (x < x_lo || x >= x_hi)
+            return false;
+    }
+    return true;
+}
+
 // ==========================================
 // RedRectDetector 类的方法实现
 // ==========================================
@@ -128,8 +232,6 @@ void RedRectDetector::sort_quad_clockwise_from_topleft(const Point2f raw[4], Poi
  *       320×130 分辨率下红块本体仅数百像素，单帧 < 1ms。
  */
 bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
-    const int scan_x_start = 45;
-    const int scan_x_end   = img.cols - 45;
     const int scan_y_start = 40;
     const int MIN_CONSECUTIVE_RED = 5;
 
@@ -149,6 +251,9 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
         int red_row_count    = 0;
         for (int y = search_from; y >= scan_y_start; y--) {
             if (visited_.at<uchar>(y, img.cols / 2)) { red_row_count = 0; continue; }
+            int scan_x_start = 0;
+            int scan_x_end   = 0;
+            vision_row_scan_xrange(img, y, scan_x_start, scan_x_end);
             Vec3b* ptr = img.ptr<Vec3b>(y);
             bool has_run = false;
             int run = 0;
@@ -174,6 +279,9 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
         int best_seed_y = confirmed_bottom;
         const int seed_scan_top = std::max(scan_y_start, confirmed_bottom - SEED_SEARCH_ROWS + 1);
         for (int y = confirmed_bottom; y >= seed_scan_top; y--) {
+            int scan_x_start = 0;
+            int scan_x_end   = 0;
+            vision_row_scan_xrange(img, y, scan_x_start, scan_x_end);
             Vec3b* row_ptr = img.ptr<Vec3b>(y);
             int cur_lx = -1;
             for (int x = scan_x_start; x < scan_x_end; x++) {
@@ -193,6 +301,11 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
         if (best_w < 8) { search_from = confirmed_bottom - 1; continue; }
 
         const Point seed((best_lx + best_rx) / 2, best_seed_y);
+        if (!vision_point_in_row_bounds(img, seed.x, seed.y))
+        {
+            search_from = confirmed_bottom - 1;
+            continue;
+        }
         const int base_w    = best_w;
         const int max_h_cap = std::max(int(base_w * 2.5f), 25); /* 下限 25 兜底，倾斜大块也能爬到顶 */
 
@@ -221,6 +334,7 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
                 int ny = p.y + dy8[k];
                 if (nx < 0 || nx >= img.cols || ny < 0 || ny >= img.rows) continue;
                 if (seed.y - ny > max_h_cap) continue;
+                if (!vision_point_in_row_bounds(img, nx, ny)) continue;
                 uchar& v = visited_.at<uchar>(ny, nx);
                 if (v) continue;
                 if (!is_red_bgr(img.at<Vec3b>(ny, nx))) continue;
@@ -244,6 +358,43 @@ bool RedRectDetector::find_red_block(Mat& img, Point2f corners[4]) {
         rr.points(raw);
         sort_quad_clockwise_from_topleft(raw, corners);
         return true;
+    }
+    return false;
+}
+
+/**
+ * @brief 轻量红块预检：自底向上行扫描，连续 RED_CONFIRM_ROWS 行有红色连续段则通过
+ * @param img [in] BGR 裁剪图
+ * @return true 可能存在红块；false 可跳过 model_roi_cut 与 NCNN
+ * @note  无 visited_/BFS/透视，直道无红块时省算力；有效红块仍以 model_roi_cut 为准
+ */
+bool RedRectDetector::probe_red_hint(const Mat& img) const
+{
+    const int scan_y_start = 40;
+    const int MIN_CONSECUTIVE_RED = 5;
+
+    int red_row_count = 0;
+    for (int y = img.rows - 1; y >= scan_y_start; y--) {
+        int scan_x_start = 0;
+        int scan_x_end   = 0;
+        vision_row_scan_xrange(img, y, scan_x_start, scan_x_end);
+        const Vec3b* ptr = img.ptr<Vec3b>(y);
+        bool has_run = false;
+        int run = 0;
+        for (int x = scan_x_start; x < scan_x_end; x++) {
+            if (is_red_bgr(ptr[x])) {
+                if (++run >= MIN_CONSECUTIVE_RED) { has_run = true; break; }
+            } else {
+                run = 0;
+            }
+        }
+        if (has_run) {
+            red_row_count++;
+            if (red_row_count >= RED_CONFIRM_ROWS)
+                return true;
+        } else {
+            red_row_count = 0;
+        }
     }
     return false;
 }
@@ -289,13 +440,18 @@ bool RedRectDetector::model_roi_cut(Mat& img, Mat& roi, bool is_draw) {
         picture_quad[2] += k * bot_dir;
     }
 
-    /* 任一角越界就放弃这一帧（车离碑太近 / 红块贴边） */
+    /* 任一角越界就放弃这一帧（车离碑太近 / 红块贴边 / 超出赛道行边界） */
     for (int i = 0; i < 4; i++) {
         if (picture_quad[i].x < 0 || picture_quad[i].x >= img.cols ||
             picture_quad[i].y < 0 || picture_quad[i].y >= img.rows) {
             g_roi_cut_reject_reason = 3;
             return false;
         }
+    }
+    if (!vision_quad_within_track_bounds(img, red) ||
+        !vision_quad_within_track_bounds(img, picture_quad)) {
+        g_roi_cut_reject_reason = 3;
+        return false;
     }
 
     /* 一步到位：透视去畸变 + 缩放到 MODEL_INPUT_WIDTH × MODEL_INPUT_WIDTH */
@@ -427,6 +583,27 @@ bool vision_save_last_roi_to_picture(void)
     return true;
 }
 
+/**
+ * @brief 红块/ROI 丢失时递增计数，超 VISION_LOST_FRAMES 后清绕行动作与 3 帧确认状态
+ * @return 无
+ */
+static void vision_handle_no_roi(void)
+{
+    if (s_no_roi_frames <= VISION_LOST_FRAMES)
+        ++s_no_roi_frames;
+    if (s_no_roi_frames > VISION_LOST_FRAMES) {
+        s_infer_cooldown_until_ms = 0;
+        if (g_vision_bypass_action != VBA_STRAIGHT) {
+            std::cout << "[智能视觉] 红块离开视野，退出绕行" << std::endl;
+            g_vision_bypass_action = VBA_STRAIGHT;
+            g_is_bypassing_binoculars = false;
+            s_confirmed_index = -2;
+            s_candidate_index = -2;
+            s_consecutive_cnt = 0;
+        }
+    }
+}
+
 // =============================================================================
 // 流水线主函数实现
 // =============================================================================
@@ -446,6 +623,12 @@ void process_car_vision(cv::Mat& frame) {
         s_dbg_vision_entry_cnt++;
     }
     // #endregion
+
+    if (!my_detector.probe_red_hint(frame)) {
+        vision_handle_no_roi();
+        g_dbg_stage_id = 42;
+        return;
+    }
 
     cv::Mat roi;
     
@@ -470,22 +653,19 @@ void process_car_vision(cv::Mat& frame) {
     if (has_roi) {
         s_no_roi_frames = 0;
     } else {
-        if (s_no_roi_frames <= VISION_LOST_FRAMES) ++s_no_roi_frames;
-        if (s_no_roi_frames > VISION_LOST_FRAMES && g_vision_bypass_action != VBA_STRAIGHT) {
-            std::cout << "[智能视觉] 红块离开视野，退出绕行" << std::endl;
-            g_vision_bypass_action = VBA_STRAIGHT;
-            g_is_bypassing_binoculars = false;
-            /* 复位 3 帧确认状态，下次进入视野重新走考察期 */
-            s_confirmed_index = -2;
-            s_candidate_index = -2;
-            s_consecutive_cnt = 0;
-        }
+        vision_handle_no_roi();
     }
 
     if (has_roi) {
         g_dbg_stage_id = 33;
         /* 缓存最近一次 ROI，供 display_show_vision 显示（深拷贝避免下一帧覆盖） */
         roi.copyTo(g_last_roi);
+
+        if (vision_infer_in_cooldown()) {
+            g_dbg_stage_id = 38;
+            return;
+        }
+
         // ✨ [新增] 调试抓拍逻辑开始
         // static int snapshot_cnt = 0; // 静态计数器
         // if (snapshot_cnt < 5) {
@@ -641,6 +821,10 @@ void process_car_vision(cv::Mat& frame) {
                 confirmed_index = candidate_index;
                 g_dbg_stage_id = 41;
             }
+
+            vision_infer_start_cooldown();
+            s_consecutive_cnt = 0;
+            s_candidate_index = -2;
         }
     }
     g_dbg_stage_id = 42;

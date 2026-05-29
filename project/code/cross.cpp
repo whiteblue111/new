@@ -9,6 +9,8 @@
 
 #include "cross.hpp"
 #include "image.hpp"
+#include "findline_core.hpp"
+#include "bird_lut.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -359,15 +361,15 @@ void Cross::cross_find_farline(cv::Mat &img,
     /* ---- 透视变换 ---- */
     for (int i = 0; i < far_pointsEdgeLeft_size; i++)
     {
-        int a, b;
-        if (general.transf(a, b, far_pointsEdgeLeft[i].x, far_pointsEdgeLeft[i].y))
+        int a = 0, b = 0;
+        if (bird_lut_transf(a, b, far_pointsEdgeLeft[i].x, far_pointsEdgeLeft[i].y))
             far_t_pointsEdgeLeft.emplace_back(a, b);
     }
     far_t_pointsEdgeLeft_size = (int)far_t_pointsEdgeLeft.size();
     for (int i = 0; i < far_pointsEdgeRight_size; i++)
     {
-        int a, b;
-        if (general.transf(a, b, far_pointsEdgeRight[i].x, far_pointsEdgeRight[i].y))
+        int a = 0, b = 0;
+        if (bird_lut_transf(a, b, far_pointsEdgeRight[i].x, far_pointsEdgeRight[i].y))
             far_t_pointsEdgeRight.emplace_back(a, b);
     }
     far_t_pointsEdgeRight_size = (int)far_t_pointsEdgeRight.size();
@@ -492,103 +494,21 @@ void Cross::calculate_s_i(int start, int end, std::vector<POINT> &pointsEdge,
 
 /* ============= 私有：迷宫法 / 滤波 / 采样 / 角度 / NMS / 找拐点 ============= */
 
-void Cross::findline_lefthand_adaptive(cv::Mat &img, int block_size, int clip_value,
+void Cross::findline_lefthand_adaptive(cv::Mat &img, int /*block_size*/, int /*clip_value*/,
                                        int x, int y,
                                        std::vector<POINT> &pointsEdgeLeft,
                                        int &pointsEdgeLeft_size)
 {
-    int half = block_size / 2;
-    int step = 0, dir = 0, turn = 0;
-
-    while ((step < POINTS_MAX_LEN) && half < x && x < (img.cols - half - 1) &&
-           half < y && y < (img.rows - half - 1) && turn < 4)
-    {
-        int local_thres = 0;
-        for (int dy = -half; dy < half; dy++)
-            for (int dx = -half; dx <= half; dx++)
-                local_thres += img.at<unsigned char>(y + dy, x + dx);
-        local_thres /= block_size * block_size;
-        local_thres -= clip_value;
-
-        int front_value     = img.at<unsigned char>(y + dir_front[dir][1],
-                                                    x + dir_front[dir][0]);
-        int frontleft_value = img.at<unsigned char>(y + dir_frontleft[dir][1],
-                                                    x + dir_frontleft[dir][0]);
-
-        if (front_value < local_thres)
-        {
-            dir = (dir + 1) % 4;
-            turn++;
-        }
-        else if (frontleft_value < local_thres)
-        {
-            x += dir_front[dir][0];
-            y += dir_front[dir][1];
-            pointsEdgeLeft.emplace_back(x, y);
-            step++;
-            turn = 0;
-        }
-        else
-        {
-            x += dir_frontleft[dir][0];
-            y += dir_frontleft[dir][1];
-            dir = (dir + 3) % 4;
-            pointsEdgeLeft.emplace_back(x, y);
-            step++;
-            turn = 0;
-        }
-    }
-    pointsEdgeLeft_size = step;
+    findline_core::lefthand_fixed(img, x, y, pointsEdgeLeft, pointsEdgeLeft_size);
 }
 
 
-void Cross::findline_righthand_adaptive(cv::Mat &img, int block_size, int clip_value,
+void Cross::findline_righthand_adaptive(cv::Mat &img, int /*block_size*/, int /*clip_value*/,
                                         int x, int y,
                                         std::vector<POINT> &pointsEdgeRight,
                                         int &pointsEdgeRight_size)
 {
-    int half = block_size / 2;
-    int step = 0, dir = 0, turn = 0;
-
-    while ((step < POINTS_MAX_LEN) && 0 < x && x < (img.cols - 1) &&
-           0 < y && y < (img.rows - 1) && turn < 4)
-    {
-        int local_thres = 0;
-        for (int dy = -half; dy < half; dy++)
-            for (int dx = -half; dx <= half; dx++)
-                local_thres += img.at<unsigned char>(y + dy, x + dx);
-        local_thres /= block_size * block_size;
-        local_thres -= clip_value;
-
-        int front_value      = img.at<unsigned char>(y + dir_front[dir][1],
-                                                     x + dir_front[dir][0]);
-        int frontright_value = img.at<unsigned char>(y + dir_frontright[dir][1],
-                                                     x + dir_frontright[dir][0]);
-
-        if (front_value < local_thres)
-        {
-            dir = (dir + 3) % 4;
-            turn++;
-        }
-        else if (frontright_value < local_thres)
-        {
-            x += dir_front[dir][0];
-            y += dir_front[dir][1];
-            pointsEdgeRight.emplace_back(x, y);
-            step++;
-            turn = 0;
-        }
-        else
-        {
-            x += dir_frontright[dir][0];
-            y += dir_frontright[dir][1];
-            dir = (dir + 1) % 4;
-            pointsEdgeRight.emplace_back(x, y);
-            step++;
-            turn = 0;
-        }
-    }
-    pointsEdgeRight_size = step;
+    findline_core::righthand_fixed(img, x, y, pointsEdgeRight, pointsEdgeRight_size);
 }
 
 

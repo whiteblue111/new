@@ -42,6 +42,15 @@ public:
      * @sample        cv::Mat bin = ip.processImage(rgb_img);
      */
     cv::Mat processImage(const cv::Mat &src_img);
+
+    /**
+     * @brief 灰度 ROI → 二值图（OTSU + 5x5 闭运算，写入 dst，复用缓冲）
+     * @param dst     [out] 输出二值图（需已分配或与 src 同尺寸）
+     * @param src_img 输入灰度 ROI
+     * @return        成功 true
+     * @sample        ip.processImageInPlace(bin_img, gray_cut_img);
+     */
+    bool processImageInPlace(cv::Mat &dst, const cv::Mat &src_img);
     cv::Mat image_correction(cv::Mat raw );
 
     /**

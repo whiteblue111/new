@@ -556,9 +556,25 @@ ImageProcess::ImageProcess() {}
 cv::Mat ImageProcess::processImage(const cv::Mat &src_img)
 {
     cv::Mat result_img;
-    cv::threshold(src_img, result_img, 100, 255, cv::THRESH_OTSU);
-    cv::morphologyEx(result_img, result_img, cv::MORPH_CLOSE, kernel);
+    processImageInPlace(result_img, src_img);
     return result_img;
+}
+
+
+/**
+ * @brief 灰度 ROI → 二值图（OTSU + 5x5 闭运算，in-place 写入 dst）
+ * @param dst     [out] 输出二值图
+ * @param src_img 输入灰度 ROI
+ * @return        成功 true
+ * @sample        ip.processImageInPlace(bin_img, gray_cut_img);
+ */
+bool ImageProcess::processImageInPlace(cv::Mat &dst, const cv::Mat &src_img)
+{
+    if (src_img.empty())
+        return false;
+    cv::threshold(src_img, dst, 100, 255, cv::THRESH_OTSU);
+    cv::morphologyEx(dst, dst, cv::MORPH_CLOSE, kernel);
+    return !dst.empty();
 }
 
 

@@ -110,8 +110,8 @@ public:
     static const int RING_FINDLINE_THRES     = 128; /**< 二值阈值（与 OTSU 一致） */
     static const int RING_FINDLINE_CENTER_BLACK_STOP = 2; /**< 中心连续黑行数达到则停止向远端扫描 */
     static const int RING_EDGE_BAND          = 3;   /**< 贴边判定：左<=5 / 右>=314 */
-    static const int RING_INSIDE_GAP         = 5;   /**< inside 与 edge 之间的安全间隙，左:x>10 右:x<309 */
-    static const int RING_BREAK_RUN_LEN      = 3;   /**< 每段最少连续行数 */
+    static const int RING_INSIDE_GAP         = 10;   /**< inside 与 edge 之间的安全间隙，左:x>10 右:x<309 */
+    static const int RING_BREAK_RUN_LEN      = 6;   /**< 每段最少连续行数 */
     static const int RING_BREAK_BAD_TOL      = 5;   /**< 每段允许的异常行数 */
     static const int RING_BREAK_SCAN_Y_TOP   = 5;  /**< 扫描 y 上界（远端透视压缩区不参与） */
 

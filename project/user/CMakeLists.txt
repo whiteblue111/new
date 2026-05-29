@@ -100,7 +100,7 @@ endif()
 # 生成可执行文件 & 配置属性
 add_executable(${PROJ_NAME} ${DIR_SRCS} ${VOFA_PLUS_SRC})
 
-option(TRACK_DEBUG_LEVEL "Track debug: 0=off 1=HUD 2=HUD+serial" 1)
+option(TRACK_DEBUG_LEVEL "Track debug: 0=off 1=HUD 2=HUD+serial" 0)
 target_compile_definitions(${PROJ_NAME} PRIVATE TRACK_DEBUG_LEVEL=${TRACK_DEBUG_LEVEL})
 if (ENABLE_VOFA)
     target_compile_definitions(${PROJ_NAME} PRIVATE ENABLE_VOFA=1)

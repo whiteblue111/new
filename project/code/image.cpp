@@ -19,10 +19,14 @@
 #include "redbrick.hpp"
 #include "vision.hpp"
 #include "banmaxian.hpp"
+#include "bird_lut.hpp"
+#include "findline_core.hpp"
+#include "perf_stats.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <time.h>
 extern RedBlockAvoider g_brick_avoider;
 
 
@@ -112,29 +116,48 @@ static bool           s_center_effective = false;
 static int            x0_seed = COLSIMAGE / 2;
 static int            x1_seed = COLSIMAGE / 2;
 
+static bool           s_track_bufs_inited   = false;
+static uint32_t       s_track_frame_idx       = 0;
+static bool           s_prev_L_left           = false;
+static bool           s_prev_L_right          = false;
+static bool           s_straight_hold_l         = false;
+static bool           s_straight_hold_r       = false;
+static bool           s_center_edge_roi_dirty = true;
+
+#if ENABLE_PERF_IMAGE_STAGES
+static uint64_t perf_now_us_local(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+#endif
+
 #define EDGE_CHECK_DIS  2    /* 跳变两侧连续同色像素数，抑制毛刺 */
 #define EDGE_MARGIN     10   /* 与迷宫起点边界 x0v>10 / x1v<WIDTH-10 一致 */
 
+static constexpr int TRACK_BOUND_MIN_WIDTH  = 8;
+static constexpr int TRACK_BOUND_VALID_ROWS = 10;
+
+static int16_t g_track_bound_left[ROI_H];
+static int16_t g_track_bound_right[ROI_H];
+static bool    g_track_row_bounds_valid = false;
+
 
 /* ====================== 内部函数声明 ====================== */
-static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int mid, int margin,
+static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int scan_from, int margin,
                                        int &out_x);
-static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int mid, int margin,
+static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int scan_from, int margin,
                                         int &out_x);
-static void findline_lefthand_adaptive(cv::Mat &img, int /*bs*/, int /*cv*/,
-                                       int x, int y,
-                                       std::vector<POINT> &out, int &out_size);
-static void findline_righthand_adaptive(cv::Mat &img, int /*bs*/, int /*cv*/,
-                                        int x, int y,
-                                        std::vector<POINT> &out, int &out_size);
+static int  track_bypass_seed_scan_from(int side, int mid, int margin, int cols);
 static void blur_points(int side, int kernel);
 static void resample_points(std::vector<POINT> &in, int in_size,
                             std::vector<POINT> &out, int &out_size, float dist);
-static void local_angle_points(std::vector<POINT> pointsEdgeIn, int size,
+static void local_angle_points(const std::vector<POINT> &pointsEdgeIn, int size,
                                std::vector<POINT> &pointsEdgeOut, int dist);
 static void nms_angle(std::vector<POINT> &in, int in_size,
                       std::vector<POINT> &out, int kernel);
-static void centerCompute(std::vector<POINT> pointsEdge, int size, int side);
+static void centerCompute(const std::vector<POINT> &pointsEdge, int size, int side);
 static void track_both_edge();
 static void line_straight_detection();
 static void find_corners();
@@ -142,6 +165,233 @@ static void trackRecognition(cv::Mat &imageBinary);
 static void fitting();
 static bool normalizeCenterEdge(float &cx, float &cy);
 static void recover_bird_edge_if_empty(int side);
+static bool track_need_full_postprocess(void);
+
+
+/**
+ * @brief 行数持平时决定补齐右侧（319）还是左侧（0）
+ * @param nL 左边界有效行数
+ * @param nR 右边界有效行数
+ * @return true 表示缺行时补右侧为 COLSIMAGE-1；false 表示补左侧为 0
+ * @note  对齐 select_track_state 的 dl/dr 与 aim_angle_last 防抖
+ */
+static bool track_pick_pad_right_side(int nL, int nR)
+{
+    const int dl = pointsEdgeLeft_size;
+    const int dr = pointsEdgeRight_size;
+    if (nL > nR)
+        return true;
+    if (nR > nL)
+        return false;
+    if ((dr - dl) > 1)
+        return false;
+    if ((dl - dr) > 1)
+        return true;
+    if (dl > dr)
+        return true;
+    if (dr > dl)
+        return false;
+    if (dl > 0 && dr > 0)
+        return aim_angle_last > 0.f;
+    if (dl > 0)
+        return true;
+    if (dr > 0)
+        return false;
+    return true;
+}
+
+
+/**
+ * @brief 迷宫巡线后由 pointsEdgeLeft/Right 重建每行左右边界
+ * @return 无
+ * @note  按迷宫步进顺序记录每 y 首个 x；短边缺行补 0 / COLSIMAGE-1
+ */
+void track_build_row_bounds_from_maze(void)
+{
+    for (int y = 0; y < ROI_H; y++)
+    {
+        g_track_bound_left[y]  = -1;
+        g_track_bound_right[y] = -1;
+    }
+
+    for (int i = 0; i < pointsEdgeLeft_size; i++)
+    {
+        const int y = pointsEdgeLeft[i].y;
+        if (y < 0 || y >= ROI_H)
+            continue;
+        if (g_track_bound_left[y] < 0)
+            g_track_bound_left[y] = (int16_t)pointsEdgeLeft[i].x;
+    }
+    for (int i = 0; i < pointsEdgeRight_size; i++)
+    {
+        const int y = pointsEdgeRight[i].y;
+        if (y < 0 || y >= ROI_H)
+            continue;
+        if (g_track_bound_right[y] < 0)
+            g_track_bound_right[y] = (int16_t)pointsEdgeRight[i].x;
+    }
+
+    int nL = 0;
+    int nR = 0;
+    for (int y = 0; y < ROI_H; y++)
+    {
+        if (g_track_bound_left[y] >= 0)
+            nL++;
+        if (g_track_bound_right[y] >= 0)
+            nR++;
+    }
+
+    const bool pad_right = track_pick_pad_right_side(nL, nR);
+    const int  x_max     = COLSIMAGE - 1;
+    if (pad_right)
+    {
+        for (int y = 0; y < ROI_H; y++)
+        {
+            if (g_track_bound_right[y] < 0)
+                g_track_bound_right[y] = (int16_t)x_max;
+        }
+    }
+    else
+    {
+        for (int y = 0; y < ROI_H; y++)
+        {
+            if (g_track_bound_left[y] < 0)
+                g_track_bound_left[y] = 0;
+        }
+    }
+
+    int valid_rows = 0;
+    for (int y = 0; y < ROI_H; y++)
+    {
+        int l = (int)g_track_bound_left[y];
+        int r = (int)g_track_bound_right[y];
+        if (l < 0 || r < 0)
+            continue;
+        if (l >= r)
+        {
+            r = std::min(x_max, l + TRACK_BOUND_MIN_WIDTH);
+            g_track_bound_right[y] = (int16_t)r;
+        }
+        if (r - l < TRACK_BOUND_MIN_WIDTH)
+        {
+            g_track_bound_left[y]  = -1;
+            g_track_bound_right[y] = -1;
+            continue;
+        }
+        valid_rows++;
+    }
+    g_track_row_bounds_valid = (valid_rows >= TRACK_BOUND_VALID_ROWS);
+}
+
+
+/**
+ * @brief 本帧行边界是否可用于约束视觉
+ * @return true 表示有效行数达到阈值
+ * @note  仅 NCNN 视觉模块使用，红砖避障勿调用
+ */
+bool track_row_bounds_enabled(void)
+{
+    return g_track_row_bounds_valid;
+}
+
+
+/**
+ * @brief 查询指定 ROI 行的允许列范围（已含 TRACK_BOUND_MARGIN）
+ * @param y     ROI 局部行号
+ * @param x_lo  [out] 含左端列号
+ * @param x_hi  [out] 不含右端列号
+ * @return      该行边界有效为 true
+ * @note  仅 NCNN 视觉模块使用，红砖避障勿调用
+ */
+bool track_row_bounds_xrange(int y, int &x_lo, int &x_hi)
+{
+    if (!g_track_row_bounds_valid || y < 0 || y >= ROI_H)
+        return false;
+
+    const int l = (int)g_track_bound_left[y];
+    const int r = (int)g_track_bound_right[y];
+    if (l < 0 || r < 0)
+        return false;
+
+    x_lo = l + TRACK_BOUND_MARGIN;
+    x_hi = r - TRACK_BOUND_MARGIN;
+    if (x_hi <= x_lo)
+        return false;
+    if (x_lo < 0)
+        x_lo = 0;
+    if (x_hi > COLSIMAGE - 1)
+        x_hi = COLSIMAGE - 1;
+    if (x_hi <= x_lo)
+        return false;
+    return true;
+}
+
+
+/**
+ * @brief 预分配巡线点集 vector 容量
+ * @return 无
+ * @sample image_track_buffers_init();
+ */
+void image_track_buffers_init(void)
+{
+    if (s_track_bufs_inited)
+        return;
+    const size_t cap = (size_t)POINTS_MAX_LEN;
+    pointsEdgeLeft.reserve(cap);          pointsEdgeRight.reserve(cap);
+    t_pointsEdgeLeft.reserve(cap);        t_pointsEdgeRight.reserve(cap);
+    b_t_pointsEdgeLeft.reserve(cap);      b_t_pointsEdgeRight.reserve(cap);
+    s_b_t_pointsEdgeLeft.reserve(cap);    s_b_t_pointsEdgeRight.reserve(cap);
+    a_t_pointsEdgeLeft.reserve(cap);      a_t_pointsEdgeRight.reserve(cap);
+    n_a_t_pointsEdgeLeft.reserve(cap);    n_a_t_pointsEdgeRight.reserve(cap);
+    t_left_CenterEdge.reserve(cap);       t_right_CenterEdge.reserve(cap);
+    t_CenterEdge.reserve(cap);            CenterEdge.reserve(cap);
+    bird_lut_init();
+    s_track_bufs_inited = true;
+}
+
+
+/**
+ * @brief 将俯视 t_CenterEdge 反透视写入 CenterEdge
+ * @return 无
+ * @sample image_sync_center_edge_roi();
+ */
+void image_sync_center_edge_roi(void)
+{
+    if (!s_center_edge_roi_dirty && CenterEdge_size > 0)
+        return;
+
+    CenterEdge.clear();
+    CenterEdge_size = 0;
+    for (int i = 0; i < t_CenterEdge_size; i++)
+    {
+        int a = 0, b = 0;
+        if (bird_lut_reverse(a, b, t_CenterEdge[i].x, t_CenterEdge[i].y))
+            CenterEdge.emplace_back(a, b);
+    }
+    CenterEdge_size = (int)CenterEdge.size();
+    s_center_edge_roi_dirty = false;
+}
+
+
+/**
+ * @brief 判定本帧是否走完整 trackRecognition 后处理链
+ * @return true 需要 blur/角度/NMS/角点/直道检测
+ */
+static bool track_need_full_postprocess(void)
+{
+#if !TRACK_FAST_PATH
+    return true;
+#endif
+    if (s_cross.flag_cross != Cross::Cross_None)
+        return true;
+    if (s_ring.flag_ring != Ring::Ring_None)
+        return true;
+    if (s_prev_L_left || s_prev_L_right)
+        return true;
+    if ((s_track_frame_idx % 3u) == 0u)
+        return true;
+    return false;
+}
 
 
 /**
@@ -191,11 +441,21 @@ bool image_get(lq_camera_ex &camera, cv::Mat &raw, cv::Mat &gray,
 {
     bool ok = camera.get_frame_raw_gray(raw, gray);
     if (!ok || raw.empty() || gray.empty()) return false;
+
+    const cv::Rect roi(0, ROI_TOP, COLSIMAGE, ROI_BOTTOM - ROI_TOP);
+
+#if ENABLE_VISION_NCNN || ENABLE_VISION_BRICK
     cv::flip(raw,  raw,  -1);
     cv::flip(gray, gray, -1);
-    cv::Rect roi(0, ROI_TOP, COLSIMAGE, ROI_BOTTOM - ROI_TOP);
-    cut_raw = raw(roi);
+    cut_raw  = raw(roi);
     cut_gray = gray(roi);
+#else
+    /* 无彩色/NCNN 模块时仅 flip ROI，减少约 46% 像素搬运 */
+    cut_raw  = raw(roi);
+    cut_gray = gray(roi);
+    cv::flip(cut_raw,  cut_raw,  -1);
+    cv::flip(cut_gray, cut_gray, -1);
+#endif
     return ok;
 }
 
@@ -210,18 +470,41 @@ void image_process(void)
 {
     if (rgb_img.empty() || gray_img.empty()) return;
 
-    /* 1)  灰度 → OTSU → 闭运算 */
-    bin_img = s_imgproc.processImage(gray_cut_img);
-    if (bin_img.empty()) return;
-    
-    // bin_bird_img = s_imgproc.image_correction(bin_img);
+    image_track_buffers_init();
+    s_track_frame_idx++;
 
-    /* 2) 调试可视化图（en_show=false 时仅占位） */
-    /* TODO: 可视化总开关，暂时 imgShow = rgb_img 的浅拷贝即可 */
+#if ENABLE_PERF_IMAGE_STAGES
+    const uint64_t t0 = perf_now_us_local();
+#endif
+
+    /* 1)  灰度 → OTSU → 闭运算（复用 bin_img 缓冲） */
+    if (bin_img.rows != gray_cut_img.rows || bin_img.cols != gray_cut_img.cols
+        || bin_img.type() != CV_8UC1)
+    {
+        bin_img.create(gray_cut_img.rows, gray_cut_img.cols, CV_8UC1);
+    }
+    if (!s_imgproc.processImageInPlace(bin_img, gray_cut_img) || bin_img.empty())
+        return;
+
+#if ENABLE_PERF_IMAGE_STAGES
+    const uint64_t t1 = perf_now_us_local();
+    perf_stats_image_stage_add(PERF_STAGE_BIN, t1 - t0);
+#endif
+
     imgShow = rgb_img;
+
+#if ENABLE_PERF_IMAGE_STAGES
+    const uint64_t t_tr0 = perf_now_us_local();
+#endif
 
     /* 3) 主巡线 */
     trackRecognition(bin_img);
+
+#if ENABLE_PERF_IMAGE_STAGES
+    const uint64_t t_tr1 = perf_now_us_local();
+    perf_stats_image_stage_add(PERF_STAGE_TRACK, t_tr1 - t_tr0);
+    const uint64_t t_cr0 = perf_now_us_local();
+#endif
 
     /* 4) 元素状态机：先判定 Cross 与 Ring，再按 scene 进入相应逻辑 */
     const bool both_straight = is_left_straight && is_right_straight;
@@ -236,8 +519,8 @@ void image_process(void)
                       t_pointsEdgeLeft_size, t_pointsEdgeRight_size,
                       both_straight);
 
-    /* 4.5) 斑马线识别（仅检测，无控制；需先看到一次 Cross_Begin） */
-    banmaxian_check(bin_img, (int)s_cross.flag_cross);
+    if (s_cross.flag_cross != Cross::Cross_None || banmaxian_is_armed())
+        banmaxian_check(bin_img, (int)s_cross.flag_cross);
 
     if (s_cross.flag_cross == Cross::Cross_None)
     {
@@ -254,9 +537,6 @@ void image_process(void)
                         bin_img);
     }
 
-    /* 十字/环岛可能截断俯视图边线；ROI 绿线仍在时从 pointsEdge 恢复 t_pointsEdge。
-     * Cross_Out / Cross_Begin 特例：只在双侧都为空时才 recover，避免单边远线/单 L 场景下
-     * 被截断或清空的对面侧被整条近线（含跨十字段）填回，骗过 select_track_state 的点数选边。 */
     if (s_cross.flag_cross == Cross::Cross_Out
         || s_cross.flag_cross == Cross::Cross_Begin)
     {
@@ -272,15 +552,28 @@ void image_process(void)
         recover_bird_edge_if_empty(1);
     }
 
-    /* 5) scene 联动（十字 / 环岛场景标记） */
     if (s_cross.flag_cross != Cross::Cross_None)      scene = (int)Scene::CrossScene;
     else if (s_ring.flag_ring != Ring::Ring_None)     scene = (int)Scene::RingScene;
     else                                              scene = (int)Scene::NormalScene;
 
     track_assert_edge_sizes("pre-fitting");
 
-    /* 6) 拟合中线 */
+#if ENABLE_PERF_IMAGE_STAGES
+    const uint64_t t_cr1 = perf_now_us_local();
+    perf_stats_image_stage_add(PERF_STAGE_CROSS_RING, t_cr1 - t_cr0);
+    const uint64_t t_fit0 = perf_now_us_local();
+#endif
+
     fitting();
+
+#if ENABLE_PERF_IMAGE_STAGES
+    const uint64_t t_fit1 = perf_now_us_local();
+    perf_stats_image_stage_add(PERF_STAGE_FITTING, t_fit1 - t_fit0);
+#endif
+
+    s_prev_L_left  = is_t_L_pointLeft_find;
+    s_prev_L_right = is_t_L_pointRight_find;
+    s_center_edge_roi_dirty = true;
 }
 
 
@@ -359,6 +652,8 @@ static void trackRecognition(cv::Mat &imageBinary)
     a_t_pointsEdgeRight.clear();   a_t_pointsEdgeRight_size   = 0;
     n_a_t_pointsEdgeLeft.clear();  n_a_t_pointsEdgeLeft_size  = 0;
     n_a_t_pointsEdgeRight.clear(); n_a_t_pointsEdgeRight_size = 0;
+    g_track_row_bounds_valid = false;
+
     is_t_L_pointLeft_find  = false;
     is_t_L_pointRight_find = false;
     is_left_straight       = false;
@@ -425,14 +720,20 @@ static void trackRecognition(cv::Mat &imageBinary)
     // }
     // mask.release();
 
-    /* ===== 2) 底行跳变：从中心向左右找迷宫起点 ===== */
+    /* ===== 2) 底行跳变：正常从中心扫；视觉绕行时从上一帧边线起点 ±5px 锚定 ===== */
     int y0 = rowCutBottom_roi;
     int y1 = rowCutBottom_roi;
-    int mid = bin_cols / 2;
+    const int mid = bin_cols / 2;
     int x0v = mid;
     int x1v = mid;
-    bool found_l = find_bottom_edge_seed_left(imageBinary, y0, mid, EDGE_MARGIN, x0v);
-    bool found_r = find_bottom_edge_seed_right(imageBinary, y1, mid, EDGE_MARGIN, x1v);
+    const int scan_l = track_bypass_seed_scan_from(0, mid, EDGE_MARGIN, bin_cols);
+    const int scan_r = track_bypass_seed_scan_from(1, mid, EDGE_MARGIN, bin_cols);
+    bool found_l = find_bottom_edge_seed_left(imageBinary, y0, scan_l, EDGE_MARGIN, x0v);
+    bool found_r = find_bottom_edge_seed_right(imageBinary, y1, scan_r, EDGE_MARGIN, x1v);
+    if (!found_l && scan_l != mid)
+        found_l = find_bottom_edge_seed_left(imageBinary, y0, mid, EDGE_MARGIN, x0v);
+    if (!found_r && scan_r != mid)
+        found_r = find_bottom_edge_seed_right(imageBinary, y1, mid, EDGE_MARGIN, x1v);
     if (found_l)
         x0_seed = x0v;
     else
@@ -493,56 +794,41 @@ static void trackRecognition(cv::Mat &imageBinary)
 
     /* ===== 3) 迷宫法左右手巡边线 ===== */
     if (imageBinary.at<uchar>(y0, x0v) >= thresOTSU && x0v > EDGE_MARGIN)
-        findline_lefthand_adaptive(imageBinary, block_size, clip_value, x0v, y0,
-                                   pointsEdgeLeft, pointsEdgeLeft_size);
+        findline_core::lefthand_fixed(imageBinary, x0v, y0,
+                                      pointsEdgeLeft, pointsEdgeLeft_size);
     else
         pointsEdgeLeft_size = 0;
 
     if (imageBinary.at<uchar>(y1, x1v) >= thresOTSU && x1v < WIDTH - EDGE_MARGIN)
-        findline_righthand_adaptive(imageBinary, block_size, clip_value, x1v, y1,
-                                    pointsEdgeRight, pointsEdgeRight_size);
+        findline_core::righthand_fixed(imageBinary, x1v, y1,
+                                       pointsEdgeRight, pointsEdgeRight_size);
     else
         pointsEdgeRight_size = 0;
 
-    /* 圆形伪线过滤（直行邻接 4 点完全相同视为环形）!!!!!疑似有问题 */
-    // if (pointsEdgeLeft_size > 8)
-    // {
-    //     bool circular = true;
-    //     for (int i = 0; i < 4; i++)
-    //         if (pointsEdgeLeft[i].x != pointsEdgeLeft[i + 4].x
-    //          || pointsEdgeLeft[i].y != pointsEdgeLeft[i + 4].y) { circular = false; break; }
-    //     if (circular) pointsEdgeLeft_size = 0;
-    // }
-    // if (pointsEdgeRight_size > 8)
-    // {
-    //     bool circular = true;
-    //     for (int i = 0; i < 4; i++)
-    //         if (pointsEdgeRight[i].x != pointsEdgeRight[i + 4].x
-    //          || pointsEdgeRight[i].y != pointsEdgeRight[i + 4].y) { circular = false; break; }
-    //     if (circular) pointsEdgeRight_size = 0;
-    // }
+    track_build_row_bounds_from_maze();
 
-    /* ===== 4) 透视变换 ===== */
+    /* ===== 4) 透视变换（LUT） ===== */
     for (int i = 0; i < pointsEdgeLeft_size; i++)
     {
-        int a, b;
-        if (s_general.transf(a, b, pointsEdgeLeft[i].x, pointsEdgeLeft[i].y))
+        int a = 0, b = 0;
+        if (bird_lut_transf(a, b, pointsEdgeLeft[i].x, pointsEdgeLeft[i].y))
             t_pointsEdgeLeft.emplace_back(a, b);
     }
     t_pointsEdgeLeft_size = (int)t_pointsEdgeLeft.size();
     for (int i = 0; i < pointsEdgeRight_size; i++)
     {
-        int a, b;
-        if (s_general.transf(a, b, pointsEdgeRight[i].x, pointsEdgeRight[i].y))
+        int a = 0, b = 0;
+        if (bird_lut_transf(a, b, pointsEdgeRight[i].x, pointsEdgeRight[i].y))
             t_pointsEdgeRight.emplace_back(a, b);
     }
     t_pointsEdgeRight_size = (int)t_pointsEdgeRight.size();
 
+    const bool full_post = track_need_full_postprocess();
+    const int blur_k = full_post ? 11 : 5;
+
     /* ===== 5) 滤波 ===== */
-    blur_points(0, 11);
-    blur_points(1, 11);
-    b_t_pointsEdgeLeft_size  = t_pointsEdgeLeft_size;
-    b_t_pointsEdgeRight_size = t_pointsEdgeRight_size;
+    blur_points(0, blur_k);
+    blur_points(1, blur_k);
 
     /* ===== 6) 等距采样 ===== */
     resample_points(b_t_pointsEdgeLeft,  b_t_pointsEdgeLeft_size,
@@ -552,41 +838,55 @@ static void trackRecognition(cv::Mat &imageBinary)
                     s_b_t_pointsEdgeRight, s_b_t_pointsEdgeRight_size,
                     (float)(SAMPLE_DIST * pixel_per_meter));
 
-    /* ===== 7) 角度 ===== */
-    local_angle_points(s_b_t_pointsEdgeLeft,  s_b_t_pointsEdgeLeft_size,
-                       a_t_pointsEdgeLeft, 7);
-    a_t_pointsEdgeLeft_size = (int)a_t_pointsEdgeLeft.size();
-    local_angle_points(s_b_t_pointsEdgeRight, s_b_t_pointsEdgeRight_size,
-                       a_t_pointsEdgeRight, 7);
-    a_t_pointsEdgeRight_size = (int)a_t_pointsEdgeRight.size();
-
-    /* ===== 8) NMS ===== */
-    nms_angle(a_t_pointsEdgeLeft,  a_t_pointsEdgeLeft_size,
-              n_a_t_pointsEdgeLeft, 14);
-    n_a_t_pointsEdgeLeft_size = (int)n_a_t_pointsEdgeLeft.size();
-    nms_angle(a_t_pointsEdgeRight, a_t_pointsEdgeRight_size,
-              n_a_t_pointsEdgeRight, 14);
-    n_a_t_pointsEdgeRight_size = (int)n_a_t_pointsEdgeRight.size();
-
-    /* ===== 9) 把等距采样后点写回 t_pointsEdge ===== */
-    t_pointsEdgeLeft.clear();   t_pointsEdgeLeft_size  = 0;
-    t_pointsEdgeRight.clear();  t_pointsEdgeRight_size = 0;
-    for (int i = 0; i < s_b_t_pointsEdgeLeft_size; i++)
+    if (full_post)
     {
-        t_pointsEdgeLeft.emplace_back(s_b_t_pointsEdgeLeft[i].x,
-                                      s_b_t_pointsEdgeLeft[i].y);
-        t_pointsEdgeLeft_size++;
-    }
-    for (int i = 0; i < s_b_t_pointsEdgeRight_size; i++)
-    {
-        t_pointsEdgeRight.emplace_back(s_b_t_pointsEdgeRight[i].x,
-                                       s_b_t_pointsEdgeRight[i].y);
-        t_pointsEdgeRight_size++;
-    }
+        /* ===== 7) 角度 ===== */
+        local_angle_points(s_b_t_pointsEdgeLeft,  s_b_t_pointsEdgeLeft_size,
+                           a_t_pointsEdgeLeft, 7);
+        a_t_pointsEdgeLeft_size = (int)a_t_pointsEdgeLeft.size();
+        local_angle_points(s_b_t_pointsEdgeRight, s_b_t_pointsEdgeRight_size,
+                           a_t_pointsEdgeRight, 7);
+        a_t_pointsEdgeRight_size = (int)a_t_pointsEdgeRight.size();
 
-    /* ===== 10) 直道判断 + 找 L 角点 ===== */
-    line_straight_detection();
-    find_corners();
+        /* ===== 8) NMS ===== */
+        nms_angle(a_t_pointsEdgeLeft,  a_t_pointsEdgeLeft_size,
+                  n_a_t_pointsEdgeLeft, 14);
+        n_a_t_pointsEdgeLeft_size = (int)n_a_t_pointsEdgeLeft.size();
+        nms_angle(a_t_pointsEdgeRight, a_t_pointsEdgeRight_size,
+                  n_a_t_pointsEdgeRight, 14);
+        n_a_t_pointsEdgeRight_size = (int)n_a_t_pointsEdgeRight.size();
+
+        /* ===== 9) 写回 t_pointsEdge ===== */
+        t_pointsEdgeLeft.swap(s_b_t_pointsEdgeLeft);
+        t_pointsEdgeLeft_size = (int)t_pointsEdgeLeft.size();
+        t_pointsEdgeRight.swap(s_b_t_pointsEdgeRight);
+        t_pointsEdgeRight_size = (int)t_pointsEdgeRight.size();
+        s_b_t_pointsEdgeLeft.clear();
+        s_b_t_pointsEdgeRight.clear();
+        s_b_t_pointsEdgeLeft_size  = 0;
+        s_b_t_pointsEdgeRight_size = 0;
+
+        line_straight_detection();
+        find_corners();
+        s_straight_hold_l = is_left_straight;
+        s_straight_hold_r = is_right_straight;
+    }
+    else
+    {
+        t_pointsEdgeLeft.swap(s_b_t_pointsEdgeLeft);
+        t_pointsEdgeLeft_size = (int)t_pointsEdgeLeft.size();
+        t_pointsEdgeRight.swap(s_b_t_pointsEdgeRight);
+        t_pointsEdgeRight_size = (int)t_pointsEdgeRight.size();
+        s_b_t_pointsEdgeLeft.clear();
+        s_b_t_pointsEdgeRight.clear();
+        s_b_t_pointsEdgeLeft_size  = 0;
+        s_b_t_pointsEdgeRight_size = 0;
+
+        is_left_straight  = s_straight_hold_l;
+        is_right_straight = s_straight_hold_r;
+        is_left_curve     = false;
+        is_right_curve    = false;
+    }
 }
 
 
@@ -769,14 +1069,8 @@ static void fitting()
     s_track_cx = cx;
     s_track_cy = cy;
 
-    /* 反透视：基于归一化后的 t_CenterEdge，送逐飞助手 XY_BOUNDARY（ROI 局部坐标） */
-    for (int i = 0; i < t_CenterEdge_size; i++)
-    {
-        int a, b;
-        if (s_general.Reverse_transf(a, b, t_CenterEdge[i].x, t_CenterEdge[i].y))
-            CenterEdge.emplace_back(a, b);
-    }
-    CenterEdge_size = (int)CenterEdge.size();
+    /* 反透视：按需由 image_sync_center_edge_roi() 填充 CenterEdge */
+    s_center_edge_roi_dirty = true;
 }
 
 
@@ -830,24 +1124,55 @@ static bool normalizeCenterEdge(float &cx, float &cy)
 /* ============================ 底行跳变起点 ============================ */
 
 /**
- * @brief 在固定行上从中心向左找白→黑跳变作为左迷宫起点
- * @param img     二值图（ROI 局部坐标）
- * @param y       扫描行号（局部行，常用 rowCutBottom_roi）
- * @param mid     中心列号
- * @param margin  左右边界留白（列号下限为 margin + EDGE_CHECK_DIS）
- * @param out_x   [out] 跳变后白侧列号
- * @return        找到合法跳变为 true
- * @note          取离中心最近且通过 EDGE_CHECK_DIS 连续段检验的跳变
+ * @brief 按视觉绕行状态计算底行跳变扫描起点
+ * @param side      0=左线，1=右线
+ * @param mid       图像中心列（正常模式）
+ * @param margin    边界留白 EDGE_MARGIN
+ * @param cols      图像宽度
+ * @return          本帧 scan_from（已 clamp 到合法范围）
+ * @note            VBA_RIGHT 时右线从 x1_seed-5 起扫；VBA_LEFT 时左线从 x0_seed+5 起扫；
+ *                  VBA_STRAIGHT 或非 ENABLE_VISION_BYPASS 时返回 mid
  */
-static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int mid, int margin,
+static int track_bypass_seed_scan_from(int side, int mid, int margin, int cols)
+{
+    const int x_min = margin + EDGE_CHECK_DIS;
+    const int x_max = cols - margin - EDGE_CHECK_DIS - 1;
+    int scan = mid;
+
+#if ENABLE_VISION_BYPASS
+    if (side == 1 && g_vision_bypass_action == VBA_RIGHT)
+        scan = x1_seed - VISION_BYPASS_SHIFT_PX;
+    else if (side == 0 && g_vision_bypass_action == VBA_LEFT)
+        scan = x0_seed + VISION_BYPASS_SHIFT_PX;
+#endif
+
+    if (scan < x_min)
+        scan = x_min;
+    else if (scan > x_max)
+        scan = x_max;
+    return scan;
+}
+
+
+/**
+ * @brief 在固定行上从 scan_from 向左找白→黑跳变作为左迷宫起点
+ * @param img       二值图（ROI 局部坐标）
+ * @param y         扫描行号（局部行，常用 rowCutBottom_roi）
+ * @param scan_from 扫描起始列号（正常模式为 mid，绕行时为上一帧左线起点 +5）
+ * @param margin    左右边界留白（列号下限为 margin + EDGE_CHECK_DIS）
+ * @param out_x     [out] 跳变后白侧列号
+ * @return          找到合法跳变为 true
+ * @note            取离 scan_from 最近且通过 EDGE_CHECK_DIS 连续段检验的跳变
+ */
+static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int scan_from, int margin,
                                        int &out_x)
 {
     const int cols = img.cols;
     const int left_stop = margin + EDGE_CHECK_DIS;
-    if (y < 0 || y >= img.rows || mid < left_stop)
+    if (y < 0 || y >= img.rows || scan_from < left_stop)
         return false;
 
-    for (int x = mid; x > left_stop; --x)
+    for (int x = scan_from; x > left_stop; --x)
     {
         if (img.at<uchar>(y, x) < thresOTSU || img.at<uchar>(y, x - 1) >= thresOTSU)
             continue;
@@ -877,24 +1202,24 @@ static bool find_bottom_edge_seed_left(const cv::Mat &img, int y, int mid, int m
 
 
 /**
- * @brief 在固定行上从中心向右找白→黑跳变作为右迷宫起点
- * @param img     二值图（ROI 局部坐标）
- * @param y       扫描行号（局部行，常用 rowCutBottom_roi）
- * @param mid     中心列号
- * @param margin  左右边界留白（列号上限为 cols - margin - EDGE_CHECK_DIS - 1）
- * @param out_x   [out] 跳变前白侧列号
- * @return        找到合法跳变为 true
- * @note          取离中心最近且通过 EDGE_CHECK_DIS 连续段检验的跳变
+ * @brief 在固定行上从 scan_from 向右找白→黑跳变作为右迷宫起点
+ * @param img       二值图（ROI 局部坐标）
+ * @param y         扫描行号（局部行，常用 rowCutBottom_roi）
+ * @param scan_from 扫描起始列号（正常模式为 mid，绕行时为上一帧右线起点 -5）
+ * @param margin    左右边界留白（列号上限为 cols - margin - EDGE_CHECK_DIS - 1）
+ * @param out_x     [out] 跳变前白侧列号
+ * @return          找到合法跳变为 true
+ * @note            取离 scan_from 最近且通过 EDGE_CHECK_DIS 连续段检验的跳变
  */
-static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int mid, int margin,
+static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int scan_from, int margin,
                                         int &out_x)
 {
     const int cols = img.cols;
     const int right_stop = cols - margin - EDGE_CHECK_DIS - 1;
-    if (y < 0 || y >= img.rows || mid > right_stop)
+    if (y < 0 || y >= img.rows || scan_from > right_stop)
         return false;
 
-    for (int x = mid; x < right_stop; ++x)
+    for (int x = scan_from; x < right_stop; ++x)
     {
         if (img.at<uchar>(y, x) < thresOTSU || img.at<uchar>(y, x + 1) >= thresOTSU)
             continue;
@@ -923,93 +1248,6 @@ static bool find_bottom_edge_seed_right(const cv::Mat &img, int y, int mid, int 
 }
 
 
-/* ============================ 迷宫法（适配版） ============================ */
-
-/**
- * @brief 左手迷宫法巡线
- * @param img          二值图
- * @param x,y          起点坐标
- * @param out          输出点序列
- * @param out_size     输出点数
- * @note  无自适应阈值版本，固定阈值 128 与 temp_repo 对齐；
- *        循环上限 POINTS_MAX_LEN（180）。
- */
-static void findline_lefthand_adaptive(cv::Mat &img, int /*bs*/, int /*cv*/,
-                                       int x, int y,
-                                       std::vector<POINT> &out, int &out_size)
-{
-    // int half = block_size / 2;
-    int step = 0, dir = 0, turn = 0;
-    while ((step < POINTS_MAX_LEN)
-        && 0 < x && x < (img.cols  - 1)
-        && 0 < y && y < (img.rows  - 1)
-        && turn < 4)
-    {
-        int local_thres     = 128;
-        int front_value     = img.at<uchar>(y + s_cross.dir_front[dir][1],
-                                            x + s_cross.dir_front[dir][0]);
-        int frontleft_value = img.at<uchar>(y + s_cross.dir_frontleft[dir][1],
-                                            x + s_cross.dir_frontleft[dir][0]);
-        if (front_value < local_thres) { dir = (dir + 1) % 4; turn++; }
-        else if (frontleft_value < local_thres)
-        {
-            x += s_cross.dir_front[dir][0];
-            y += s_cross.dir_front[dir][1];
-            out.emplace_back(x, y);
-            step++; turn = 0;
-        }
-        else
-        {
-            x += s_cross.dir_frontleft[dir][0];
-            y += s_cross.dir_frontleft[dir][1];
-            dir = (dir + 3) % 4;
-            out.emplace_back(x, y);
-            step++; turn = 0;
-        }
-    }
-    out_size = step;
-}
-
-
-/**
- * @brief 右手迷宫法巡线
- */
-static void findline_righthand_adaptive(cv::Mat &img, int /*bs*/, int /*cv*/,
-                                        int x, int y,
-                                        std::vector<POINT> &out, int &out_size)
-{
-    int step = 0, dir = 0, turn = 0;
-    while ((step < POINTS_MAX_LEN)
-        && 0 < x && x < (img.cols - 1)
-        && 0 < y && y < (img.rows - 1)
-        && turn < 4)
-    {
-        int local_thres      = 128;
-        int front_value      = img.at<uchar>(y + s_cross.dir_front[dir][1],
-                                             x + s_cross.dir_front[dir][0]);
-        int frontright_value = img.at<uchar>(y + s_cross.dir_frontright[dir][1],
-                                             x + s_cross.dir_frontright[dir][0]);
-        if (front_value < local_thres) { dir = (dir + 3) % 4; turn++; }
-        else if (frontright_value < local_thres)
-        {
-            x += s_cross.dir_front[dir][0];
-            y += s_cross.dir_front[dir][1];
-            out.emplace_back(x, y);
-            step++; turn = 0;
-        }
-        else
-        {
-            x += s_cross.dir_frontright[dir][0];
-            y += s_cross.dir_frontright[dir][1];
-            dir = (dir + 1) % 4;
-            out.emplace_back(x, y);
-            step++; turn = 0;
-        }
-    }
-    out_size = step;
-}
-
-
 /* ============================ 后处理 ============================ */
 
 /**
@@ -1022,6 +1260,7 @@ static void blur_points(int side, int kernel)
     int half = kernel / 2;
     if (side == 0)
     {
+        b_t_pointsEdgeLeft.clear();
         for (int i = 0; i < t_pointsEdgeLeft_size; i++)
         {
             b_t_pointsEdgeLeft.emplace_back(0, 0);
@@ -1039,6 +1278,7 @@ static void blur_points(int side, int kernel)
     }
     else
     {
+        b_t_pointsEdgeRight.clear();
         for (int i = 0; i < t_pointsEdgeRight_size; i++)
         {
             b_t_pointsEdgeRight.emplace_back(0, 0);
@@ -1113,7 +1353,7 @@ static void resample_points(std::vector<POINT> &in, int in_size,
  * @param pointsEdgeOut [out] 输出点序列（写入 angle 字段）
  * @param dist          前后步长（单位：点）
  */
-static void local_angle_points(std::vector<POINT> pointsEdgeIn, int size,
+static void local_angle_points(const std::vector<POINT> &pointsEdgeIn, int size,
                                std::vector<POINT> &pointsEdgeOut, int dist)
 {
     for (int i = 0; i < size; i++)
@@ -1176,7 +1416,7 @@ static void nms_angle(std::vector<POINT> &in, int in_size,
  * @param size       点数
  * @param side       0=左边线（中线在边线右），1=右边线
  */
-static void centerCompute(std::vector<POINT> pointsEdge, int size, int side)
+static void centerCompute(const std::vector<POINT> &pointsEdge, int size, int side)
 {
     const int vec_n = (int)pointsEdge.size();
     if (size > vec_n)
@@ -1235,7 +1475,7 @@ static void recover_bird_edge_if_empty(int side)
         for (int i = 0; i < pointsEdgeLeft_size; i++)
         {
             int a = 0, b = 0;
-            if (s_general.transf(a, b, pointsEdgeLeft[i].x, pointsEdgeLeft[i].y))
+            if (bird_lut_transf(a, b, pointsEdgeLeft[i].x, pointsEdgeLeft[i].y))
                 t_pointsEdgeLeft.emplace_back(a, b);
         }
         t_pointsEdgeLeft_size = (int)t_pointsEdgeLeft.size();
@@ -1248,7 +1488,7 @@ static void recover_bird_edge_if_empty(int side)
         for (int i = 0; i < pointsEdgeRight_size; i++)
         {
             int a = 0, b = 0;
-            if (s_general.transf(a, b, pointsEdgeRight[i].x, pointsEdgeRight[i].y))
+            if (bird_lut_transf(a, b, pointsEdgeRight[i].x, pointsEdgeRight[i].y))
                 t_pointsEdgeRight.emplace_back(a, b);
         }
         t_pointsEdgeRight_size = (int)t_pointsEdgeRight.size();

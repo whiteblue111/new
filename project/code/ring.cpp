@@ -7,6 +7,7 @@
  */
 
 #include "ring.hpp"
+#include "findline_core.hpp"
 #include <cmath>
 #include <cstdio>
 
@@ -375,21 +376,36 @@ void Ring::Ring_Check(cv::Mat &imgBinary,
 
         snap.eval_enabled = 1;
 
-        /* 行扫描 + 断线模式：辅助进环判据（与 L 角点/边线点数/直道 AND） */
-        ring_findline(imgBinary);
-        int yb_l = -1, yt_l = -1;
-        int yb_r = -1, yt_r = -1;
-        ring_break_left  = ring_breakline_check(0, yb_l, yt_l);
-        ring_break_right = ring_breakline_check(1, yb_r, yt_r);
-        ring_break_y_bot[0] = yb_l; ring_break_y_top[0] = yt_l;
-        ring_break_y_bot[1] = yb_r; ring_break_y_top[1] = yt_r;
-
         const bool left_single_corner_ok = is_L_left_found && !is_L_right_found;
         const bool right_single_corner_ok = is_L_right_found && !is_L_left_found;
         const bool left_size_ok = t_pointsEdgeLeft_size < L_SMALL
                                && t_pointsEdgeRight_size > R_LARGE;
         const bool right_size_ok = t_pointsEdgeRight_size < L_SMALL
                                 && t_pointsEdgeLeft_size > R_LARGE;
+
+        /* 行扫描 + 断线模式：仅环岛进环候选帧执行（单 L + 点数失衡） */
+        const bool ring_scan_candidate =
+            (left_single_corner_ok && left_size_ok)
+            || (right_single_corner_ok && right_size_ok);
+
+        if (ring_scan_candidate)
+        {
+            ring_findline(imgBinary);
+            int yb_l = -1, yt_l = -1;
+            int yb_r = -1, yt_r = -1;
+            ring_break_left  = ring_breakline_check(0, yb_l, yt_l);
+            ring_break_right = ring_breakline_check(1, yb_r, yt_r);
+            ring_break_y_bot[0] = yb_l; ring_break_y_top[0] = yt_l;
+            ring_break_y_bot[1] = yb_r; ring_break_y_top[1] = yt_r;
+        }
+        else
+        {
+            ring_break_left  = false;
+            ring_break_right = false;
+            ring_break_y_bot[0] = -1; ring_break_y_top[0] = -1;
+            ring_break_y_bot[1] = -1; ring_break_y_top[1] = -1;
+        }
+
         const bool left_straight_ok = is_right_straight && !is_left_straight;
         const bool right_straight_ok = is_left_straight && !is_right_straight;
         const bool left_y_ok = t_L_pointLeft.y < 110 && t_L_pointLeft.y > 20;
@@ -797,36 +813,8 @@ void Ring::findline_lefthand_adaptive(cv::Mat &img, int /*block_size*/, int /*cl
                                       std::vector<POINT> &pointsEdgeLeft,
                                       int &pointsEdgeLeft_size)
 {
-    int half = block_size / 2;
-    int step = 0, dir = 0, turn = 0;
-    while ((step < POINTS_MAX_LEN / 2)
-        && half < x && x < (img.cols - half - 1)
-        && half < y && y < (img.rows - half - 1)
-        && turn < 4)
-    {
-        int local_thres = 128;
-        int front_value     = img.at<unsigned char>(y + dir_front[dir][1],
-                                                    x + dir_front[dir][0]);
-        int frontleft_value = img.at<unsigned char>(y + dir_frontleft[dir][1],
-                                                    x + dir_frontleft[dir][0]);
-        if (front_value < local_thres) { dir = (dir + 1) % 4; turn++; }
-        else if (frontleft_value < local_thres)
-        {
-            x += dir_front[dir][0];
-            y += dir_front[dir][1];
-            pointsEdgeLeft.emplace_back(x, y);
-            step++; turn = 0;
-        }
-        else
-        {
-            x += dir_frontleft[dir][0];
-            y += dir_frontleft[dir][1];
-            dir = (dir + 3) % 4;
-            pointsEdgeLeft.emplace_back(x, y);
-            step++; turn = 0;
-        }
-    }
-    pointsEdgeLeft_size = step;
+    findline_core::lefthand_fixed(img, x, y, pointsEdgeLeft, pointsEdgeLeft_size,
+                                  POINTS_MAX_LEN / 2);
 }
 
 
@@ -835,35 +823,8 @@ void Ring::findline_righthand_adaptive(cv::Mat &img, int /*block_size*/, int /*c
                                        std::vector<POINT> &pointsEdgeRight,
                                        int &pointsEdgeRight_size)
 {
-    int step = 0, dir = 0, turn = 0;
-    while ((step < POINTS_MAX_LEN / 2)
-        && 0 < x && x < (img.cols - 1)
-        && 0 < y && y < (img.rows - 1)
-        && turn < 4)
-    {
-        int local_thres = 128;
-        int front_value      = img.at<unsigned char>(y + dir_front[dir][1],
-                                                     x + dir_front[dir][0]);
-        int frontright_value = img.at<unsigned char>(y + dir_frontright[dir][1],
-                                                     x + dir_frontright[dir][0]);
-        if (front_value < local_thres) { dir = (dir + 3) % 4; turn++; }
-        else if (frontright_value < local_thres)
-        {
-            x += dir_front[dir][0];
-            y += dir_front[dir][1];
-            pointsEdgeRight.emplace_back(x, y);
-            step++; turn = 0;
-        }
-        else
-        {
-            x += dir_frontright[dir][0];
-            y += dir_frontright[dir][1];
-            dir = (dir + 1) % 4;
-            pointsEdgeRight.emplace_back(x, y);
-            step++; turn = 0;
-        }
-    }
-    pointsEdgeRight_size = step;
+    findline_core::righthand_fixed(img, x, y, pointsEdgeRight, pointsEdgeRight_size,
+                                   POINTS_MAX_LEN / 2);
 }
 
 
